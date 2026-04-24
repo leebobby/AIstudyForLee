@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# CMake 编译输出（每个项目的 build/ 目录）
+workspace/*/build/
+
+# 不把 API Key 提交进去
+*.local.py
