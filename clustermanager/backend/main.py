@@ -1,0 +1,54 @@
+"""
+Cluster Manager - FastAPI 主入口
+"""
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+
+from backend.models.node import init_db
+from backend.api import nodes, pxe, ipmi, network, alerts, diagnose, patrol
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时初始化数据库
+    init_db()
+    yield
+    # 关闭时清理资源
+
+
+app = FastAPI(
+    title="Cluster Manager",
+    description="集群配置、管理、诊断系统 - 支持三平面网络架构",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS配置
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 注册路由
+app.include_router(nodes.router, prefix="/api/nodes", tags=["节点管理"])
+app.include_router(pxe.router, prefix="/api/pxe", tags=["PXE部署"])
+app.include_router(ipmi.router, prefix="/api/ipmi", tags=["IPMI/BMC"])
+app.include_router(network.router, prefix="/api/network", tags=["网络配置"])
+app.include_router(alerts.router, prefix="/api/alerts", tags=["告警管理"])
+app.include_router(diagnose.router, prefix="/api/diagnose", tags=["故障诊断"])
+app.include_router(patrol.router, prefix="/api/patrol", tags=["巡检管理"])
+
+
+@app.get("/")
+async def root():
+    return {"message": "Cluster Manager API", "version": "1.0.0"}
+
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "healthy"}
