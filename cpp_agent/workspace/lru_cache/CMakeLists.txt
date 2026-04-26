@@ -1,0 +1,1 @@
+cmake_minimum_required(VERSION 3.10)\nproject(LRUCacheProject)\n\nset(CMAKE_CXX_STANDARD 17)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\n\nadd_library(impl_lib STATIC LRUCache.cpp)\n\nadd_executable(run_tests tests/main.cpp)\ntarget_link_libraries(run_tests impl_lib)\n

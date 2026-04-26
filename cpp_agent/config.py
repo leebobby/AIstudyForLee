@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 # ── 千问 API ────────────────────────────────────────────
-QWEN_API_KEY  = os.getenv("QWEN_API_KEY", "your-api-key-here")
+QWEN_API_KEY  = os.getenv("QWEN_API_KEY", "sk-8390b57e37174d6298cc6380c11c579b")
 QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 # 普通对话用 qwen-max，代码生成用 qwen-coder-plus

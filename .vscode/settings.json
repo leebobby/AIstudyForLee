@@ -1,0 +1,4 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "cmake.sourceDirectory": "D:/01.code/00.AIstudy/AIstudyForLee/cpp_agent/workspace/basic_stack"
+}

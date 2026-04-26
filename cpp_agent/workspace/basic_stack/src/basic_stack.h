@@ -1,0 +1,1 @@
+#pragma once\n#include <stack>\n#include <stdexcept>\n#include <mutex>\n\nclass BasicStack {\npublic:\n    void push(int val);\n    int pop();\n    int top() const;\n    bool empty() const;\n\nprivate:\n    std::stack<int> data;\n    mutable std::mutex mutex_;\n};

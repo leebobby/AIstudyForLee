@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>个人主页</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">Lee</div>
+        <ul class="nav-links">
+            <li><a href="#about">关于</a></li>
+            <li><a href="#projects">项目</a></li>
+            <li><a href="#contact">联系</a></li>
+        </ul>
+    </nav>
+
+    <header class="hero">
+        <div class="hero-content">
+            <h1 class="hero-title">你好，我是 <span class="highlight">Lee</span></h1>
+            <p class="hero-subtitle">全栈开发者 / AI 研究者 / 开源爱好者</p>
+            <p class="hero-desc">热爱编程，专注于构建优雅高效的解决方案</p>
+            <a href="#projects" class="btn-primary">查看作品</a>
+        </div>
+        <div class="hero-decoration"></div>
+    </header>
+
+    <section id="about" class="section about">
+        <div class="container">
+            <h2 class="section-title">关于我</h2>
+            <div class="about-content">
+                <div class="about-text">
+                    <p>我是一名热爱技术的开发者，专注于人工智能和全栈开发领域。拥有扎实的编程基础和持续学习的热情。</p>
+                    <div class="skills">
+                        <h3>技能栈</h3>
+                        <div class="skill-tags">
+                            <span class="tag">Python</span>
+                            <span class="tag">JavaScript</span>
+                            <span class="tag">C++</span>
+                            <span class="tag">React</span>
+                            <span class="tag">Node.js</span>
+                            <span class="tag">PyTorch</span>
+                            <span class="tag">Docker</span>
+                            <span class="tag">Git</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="projects" class="section projects">
+        <div class="container">
+            <h2 class="section-title">项目展示</h2>
+            <div class="projects-grid">
+                <article class="project-card">
+                    <div class="project-header">
+                        <h3>AI Study Platform</h3>
+                        <span class="project-tag">AI</span>
+                    </div>
+                    <p class="project-desc">一个人工智能学习平台，包含多种AI算法的实现和可视化演示。</p>
+                    <div class="project-tech">
+                        <span>Python</span>
+                        <span>PyTorch</span>
+                        <span>Flask</span>
+                    </div>
+                    <a href="#" class="project-link">查看详情 →</a>
+                </article>
+
+                <article class="project-card">
+                    <div class="project-header">
+                        <h3>OpenClaw</h3>
+                        <span class="project-tag">开源</span>
+                    </div>
+                    <p class="project-desc">基于大语言模型的智能助手框架，支持多种模型接入和工具调用。</p>
+                    <div class="project-tech">
+                        <span>Python</span>
+                        <span>LangChain</span>
+                        <span>FastAPI</span>
+                    </div>
+                    <a href="#" class="project-link">查看详情 →</a>
+                </article>
+
+                <article class="project-card">
+                    <div class="project-header">
+                        <h3>CPP Agent</h3>
+                        <span class="project-tag">工具</span>
+                    </div>
+                    <p class="project-desc">C++代码智能分析与优化工具，提供代码质量检测和性能优化建议。</p>
+                    <div class="project-tech">
+                        <span>C++</span>
+                        <span>LLVM</span>
+                        <span>Python</span>
+                    </div>
+                    <a href="#" class="project-link">查看详情 →</a>
+                </article>
+            </div>
+        </div>
+    </section>
+
+    <section id="contact" class="section contact">
+        <div class="container">
+            <h2 class="section-title">联系方式</h2>
+            <div class="contact-content">
+                <p class="contact-desc">有兴趣合作或交流？欢迎通过以下方式联系我。</p>
+                <div class="contact-links">
+                    <a href="mailto:lee@example.com" class="contact-item">
+                        <span class="contact-icon">📧</span>
+                        <span>lee@example.com</span>
+                    </a>
+                    <a href="https://github.com" target="_blank" class="contact-item">
+                        <span class="contact-icon">💻</span>
+                        <span>GitHub</span>
+                    </a>
+                    <a href="#" class="contact-item">
+                        <span class="contact-icon">🔗</span>
+                        <span>LinkedIn</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <footer class="footer">
+        <p>© 2026 Lee. All rights reserved.</p>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>
