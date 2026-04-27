@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 
-from backend.models.node import Node, get_db
+from models.node import Node, get_db
 from pydantic import BaseModel
 
 

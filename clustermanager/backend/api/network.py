@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 
-from backend.models.node import Node, NetworkLink, get_db
+from models.node import Node, NetworkLink, get_db
 from pydantic import BaseModel
 
 
@@ -139,8 +139,22 @@ def get_topology_graph(db: Session = Depends(get_db)):
     nodes = db.query(Node).all()
     links = db.query(NetworkLink).all()
 
-    # 构建节点数据
+    # 构建节点数据 - 添加虚拟管理站节点
     graph_nodes = []
+
+    # 添加虚拟管理站节点（ID为"mgmt-station"）
+    graph_nodes.append({
+        "id": "mgmt-station",
+        "name": "管理站",
+        "type": "mgmt",
+        "status": "online",
+        "planes": {
+            "management": {"ip": "192.168.1.1", "status": "online"},
+            "control": {"ip": None, "status": "offline"},
+            "data": {"ip": None, "status": "offline", "protocol": None}
+        }
+    })
+
     for node in nodes:
         graph_nodes.append({
             "id": str(node.id),
@@ -165,23 +179,31 @@ def get_topology_graph(db: Session = Depends(get_db)):
             }
         })
 
-    # 构建链路数据
+    # 构建链路数据 - 过滤无效链路并转换ID
     graph_links = []
-    for link in links:
-        graph_links.append({
-            "source": str(link.source_node_id),
-            "target": str(link.target_node_id),
-            "plane": link.plane,
-            "protocol": link.protocol,
-            "bandwidth": link.bandwidth,
-            "status": link.status,
-            "latency": link.latency_ms,
-            "packet_loss": link.packet_loss_rate
-        })
+    valid_node_ids = set(["mgmt-station"] + [str(n.id) for n in nodes])
 
-    # 自动生成 Master-Slave 链路（如果数据库中没有）
+    for link in links:
+        source_id = str(link.source_node_id) if link.source_node_id else "mgmt-station"
+        target_id = str(link.target_node_id)
+
+        # 只添加有效链路（两端节点都存在）
+        if source_id in valid_node_ids and target_id in valid_node_ids:
+            graph_links.append({
+                "source": source_id,
+                "target": target_id,
+                "plane": link.plane,
+                "protocol": link.protocol,
+                "bandwidth": link.bandwidth,
+                "status": link.status,
+                "latency": link.latency_ms,
+                "packet_loss": link.packet_loss_rate
+            })
+
+    # 自动生成 Master-Slave 数据面链路（如果数据库中没有）
     masters = [n for n in nodes if n.node_type == 'master']
     slaves = [n for n in nodes if n.node_type == 'slave']
+    sensors = [n for n in nodes if n.node_type == 'sensor']
 
     for master in masters:
         for slave in slaves:
@@ -201,6 +223,46 @@ def get_topology_graph(db: Session = Depends(get_db)):
                     "bandwidth": "100GE",
                     "status": "normal" if master.data_status == 'online' and slave.data_status == 'online' else "down",
                     "latency": 0.1,
+                    "packet_loss": 0
+                })
+
+    # 自动生成传感器到Master的数据面前段链路
+    for sensor in sensors:
+        for master in masters:
+            existing = any(
+                l.source_node_id == sensor.id and
+                l.target_node_id == master.id and
+                l.plane == 'data_front'
+                for l in links
+            )
+            if not existing:
+                graph_links.append({
+                    "source": str(sensor.id),
+                    "target": str(master.id),
+                    "plane": "data_front",
+                    "protocol": "DPDK",
+                    "bandwidth": "100GE",
+                    "status": "normal" if sensor.data_status == 'online' and master.data_status == 'online' else "down",
+                    "latency": 0.1,
+                    "packet_loss": 0
+                })
+
+    # 自动生成管理面链路（所有节点连接到管理站）
+    for node in nodes:
+        if node.bmc_ip:  # 有BMC IP的节点
+            existing_mgmt = any(
+                l.plane == 'management' and str(l.target_node_id) == str(node.id)
+                for l in links
+            )
+            if not existing_mgmt:
+                graph_links.append({
+                    "source": "mgmt-station",
+                    "target": str(node.id),
+                    "plane": "management",
+                    "protocol": "IPMI",
+                    "bandwidth": "GE",
+                    "status": "normal" if node.status == 'online' else "down",
+                    "latency": 1.0,
                     "packet_loss": 0
                 })
 

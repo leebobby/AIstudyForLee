@@ -8,7 +8,7 @@ from typing import List, Optional
 from datetime import datetime
 import re
 
-from backend.models.node import Node, Log, FaultPoint, DPDKStats, RDMAStats, get_db
+from models.node import Node, Log, FaultPoint, DPDKStats, RDMAStats, get_db
 from pydantic import BaseModel
 
 

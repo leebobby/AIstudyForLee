@@ -200,10 +200,27 @@ const calcPercentage = (online, total) => {
 const loadTopology = async () => {
   try {
     const response = await axios.get('/api/network/topology-graph')
-    topologyData.value = response.data
-    renderTopology()
+    console.log('拓扑数据:', response.data)
+
+    // 确保数据格式正确
+    topologyData.value = {
+      nodes: response.data.nodes || [],
+      links: response.data.links || [],
+      metadata: response.data.metadata || {}
+    }
+
+    if (topologyData.value.nodes.length > 0) {
+      renderTopology()
+    } else {
+      // 没有数据时渲染空状态提示
+      renderTopology()
+    }
   } catch (e) {
-    ElMessage.error('获取拓扑数据失败')
+    console.error('获取拓扑数据失败:', e)
+    ElMessage.error('获取拓扑数据失败: ' + (e.response?.data?.detail || e.message))
+    // 渲染空状态
+    topologyData.value = { nodes: [], links: [] }
+    renderTopology()
   }
 }
 
@@ -241,11 +258,46 @@ const getLinkColor = (plane) => {
 const renderTopology = () => {
   if (!topologyContainer.value) return
 
-  const width = topologyContainer.value.clientWidth
+  const width = topologyContainer.value.clientWidth || 800
   const height = 500
 
   // 清除旧图
   d3.select(topologyContainer.value).selectAll('*').remove()
+
+  // 过滤数据
+  let nodes = topologyData.value.nodes || []
+  let links = topologyData.value.links || []
+
+  // 如果没有数据，显示提示
+  if (nodes.length === 0) {
+    svg = d3.select(topologyContainer.value)
+      .append('svg')
+      .attr('width', width)
+      .attr('height', height)
+      .style('background', '#1a1a2e')
+
+    svg.append('text')
+      .attr('x', width / 2)
+      .attr('y', height / 2)
+      .attr('text-anchor', 'middle')
+      .attr('fill', '#a0a0a0')
+      .attr('font-size', '16px')
+      .text('暂无节点数据，请先添加节点或执行PXE部署')
+
+    svg.append('text')
+      .attr('x', width / 2)
+      .attr('y', height / 2 + 30)
+      .attr('text-anchor', 'middle')
+      .attr('fill', '#e94560')
+      .attr('font-size', '14px')
+      .text('点击左侧 "PXE部署" 开始添加节点')
+
+    return
+  }
+
+  if (currentPlane.value !== 'all') {
+    links = links.filter(l => l.plane === currentPlane.value || l.plane.includes(currentPlane.value.split('_')[0]))
+  }
 
   // 创建SVG
   svg = d3.select(topologyContainer.value)
@@ -254,20 +306,12 @@ const renderTopology = () => {
     .attr('height', height)
     .style('background', '#1a1a2e')
 
-  // 过滤数据
-  let nodes = topologyData.value.nodes
-  let links = topologyData.value.links
-
-  if (currentPlane.value !== 'all') {
-    links = links.filter(l => l.plane === currentPlane.value || l.plane.includes(currentPlane.value.split('_')[0]))
-  }
-
-  // 创建力导向图
+  // 创建力导向图 - 使用更好的布局
   simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d => d.id).distance(150))
-    .force('charge', d3.forceManyBody().strength(-300))
+    .force('link', d3.forceLink(links).id(d => d.id).distance(120))
+    .force('charge', d3.forceManyBody().strength(-400))
     .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collision', d3.forceCollide().radius(40))
+    .force('collision', d3.forceCollide().radius(50))
 
   // 绘制链路
   const link = svg.append('g')
@@ -300,32 +344,38 @@ const renderTopology = () => {
       .on('end', dragended)
     )
     .on('click', (event, d) => {
+      event.stopPropagation()
       selectedElement.value = { type: 'node', data: d }
     })
 
-  // 节点圆形
+  // 节点圆形 - 根据类型设置不同大小
   node.append('circle')
-    .attr('r', 25)
+    .attr('r', d => d.type === 'master' ? 35 : d.type === 'sensor' ? 30 : 25)
     .attr('fill', d => getNodeColor(d.status))
-    .attr('stroke', '#fff')
-    .attr('stroke-width', 2)
+    .attr('stroke', d => d.type === 'master' ? '#e94560' : d.type === 'sensor' ? '#f56c6c' : '#fff')
+    .attr('stroke-width', d => d.type === 'master' ? 4 : 2)
 
-  // 节点标签
+  // 节点类型图标/文字
+  node.append('text')
+    .text(d => {
+      if (d.type === 'master') return 'M'
+      if (d.type === 'slave') return 'S'
+      if (d.type === 'sensor') return 'D'
+      return '?'
+    })
+    .attr('text-anchor', 'middle')
+    .attr('dy', 5)
+    .attr('fill', '#fff')
+    .attr('font-size', d => d.type === 'master' ? '18px' : '14px')
+    .attr('font-weight', 'bold')
+
+  // 节点名称标签
   node.append('text')
     .text(d => d.name)
     .attr('text-anchor', 'middle')
-    .attr('dy', 35)
+    .attr('dy', d => d.type === 'master' ? 50 : 40)
     .attr('fill', '#fff')
     .attr('font-size', '12px')
-
-  // 节点类型标签
-  node.append('text')
-    .text(d => d.type?.substring(0, 1).toUpperCase())
-    .attr('text-anchor', 'middle')
-    .attr('dy', 4)
-    .attr('fill', '#fff')
-    .attr('font-size', '14px')
-    .attr('font-weight', 'bold')
 
   // 更新位置
   simulation.on('tick', () => {

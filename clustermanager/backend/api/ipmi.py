@@ -10,7 +10,7 @@ import asyncio
 import subprocess
 import json
 
-from backend.models.node import Node, BMCInfo, get_db
+from models.node import Node, BMCInfo, get_db
 from pydantic import BaseModel
 
 

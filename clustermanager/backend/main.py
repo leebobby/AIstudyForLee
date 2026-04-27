@@ -6,14 +6,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from backend.models.node import init_db
-from backend.api import nodes, pxe, ipmi, network, alerts, diagnose, patrol
+from models.node import init_db
+from models.seed import seed_demo_data
+from api import nodes, pxe, ipmi, network, alerts, diagnose, patrol
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时初始化数据库
     init_db()
+    # 生成演示数据
+    seed_demo_data()
     yield
     # 关闭时清理资源
 
