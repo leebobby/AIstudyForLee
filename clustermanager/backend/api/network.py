@@ -137,24 +137,37 @@ def get_network_status(db: Session = Depends(get_db)):
 def get_topology_graph(db: Session = Depends(get_db)):
     """获取组网图数据（用于前端D3.js渲染）"""
     nodes = db.query(Node).all()
-    links = db.query(NetworkLink).all()
 
-    # 构建节点数据 - 添加虚拟管理站节点
-    graph_nodes = []
+    masters = [n for n in nodes if n.node_type == 'master']
+    slaves  = [n for n in nodes if n.node_type == 'slave']
+    sensors = [n for n in nodes if n.node_type == 'sensor']
 
-    # 添加虚拟管理站节点（ID为"mgmt-station"）
-    graph_nodes.append({
-        "id": "mgmt-station",
-        "name": "管理站",
-        "type": "mgmt",
-        "status": "online",
-        "planes": {
-            "management": {"ip": "192.168.1.1", "status": "online"},
-            "control": {"ip": None, "status": "offline"},
-            "data": {"ip": None, "status": "offline", "protocol": None}
-        }
-    })
+    # ── 基础设施虚拟节点 ──────────────────────────────────────
+    graph_nodes = [
+        {
+            "id": "mgmt-station",
+            "name": "管理站",
+            "type": "mgmt_station",
+            "status": "online",
+            "planes": {"management": {"ip": "192.168.1.1", "status": "online"}}
+        },
+        {
+            "id": "sw-mgmt",
+            "name": "管理交换机 GE",
+            "type": "switch",
+            "switch_plane": "management",
+            "status": "online"
+        },
+        {
+            "id": "sw-ctrl",
+            "name": "控制交换机 10GE",
+            "type": "switch",
+            "switch_plane": "control",
+            "status": "online" if any(n.ctrl_status == 'online' for n in nodes) else "offline"
+        },
+    ]
 
+    # ── 服务器节点 ────────────────────────────────────────────
     for node in nodes:
         graph_nodes.append({
             "id": str(node.id),
@@ -179,92 +192,56 @@ def get_topology_graph(db: Session = Depends(get_db)):
             }
         })
 
-    # 构建链路数据 - 过滤无效链路并转换ID
     graph_links = []
-    valid_node_ids = set(["mgmt-station"] + [str(n.id) for n in nodes])
 
-    for link in links:
-        source_id = str(link.source_node_id) if link.source_node_id else "mgmt-station"
-        target_id = str(link.target_node_id)
-
-        # 只添加有效链路（两端节点都存在）
-        if source_id in valid_node_ids and target_id in valid_node_ids:
+    # ── 管理面：管理站 → 管理交换机 → 所有节点 ───────────────
+    graph_links.append({
+        "source": "mgmt-station", "target": "sw-mgmt",
+        "plane": "management", "protocol": "IPMI",
+        "bandwidth": "GE", "status": "normal", "latency": 0.5, "packet_loss": 0
+    })
+    for node in nodes:
+        if node.bmc_ip or node.mgmt_ip:
             graph_links.append({
-                "source": source_id,
-                "target": target_id,
-                "plane": link.plane,
-                "protocol": link.protocol,
-                "bandwidth": link.bandwidth,
-                "status": link.status,
-                "latency": link.latency_ms,
-                "packet_loss": link.packet_loss_rate
+                "source": "sw-mgmt", "target": str(node.id),
+                "plane": "management", "protocol": "IPMI",
+                "bandwidth": "GE",
+                "status": "normal" if node.status == "online" else "down",
+                "latency": 1.0, "packet_loss": 0
             })
 
-    # 自动生成 Master-Slave 数据面链路（如果数据库中没有）
-    masters = [n for n in nodes if n.node_type == 'master']
-    slaves = [n for n in nodes if n.node_type == 'slave']
-    sensors = [n for n in nodes if n.node_type == 'sensor']
+    # ── 控制面：控制交换机 → 所有有控制面 IP 的节点 ──────────
+    for node in nodes:
+        if node.ctrl_ip:
+            graph_links.append({
+                "source": "sw-ctrl", "target": str(node.id),
+                "plane": "control", "protocol": "TCP",
+                "bandwidth": "10GE",
+                "status": "normal" if node.ctrl_status == "online" else "down",
+                "latency": 0.5, "packet_loss": 0
+            })
 
-    for master in masters:
-        for slave in slaves:
-            # 数据面后段链路 (Master -> Slave, RDMA)
-            existing = any(
-                l.source_node_id == master.id and
-                l.target_node_id == slave.id and
-                l.plane == 'data_back'
-                for l in links
-            )
-            if not existing:
-                graph_links.append({
-                    "source": str(master.id),
-                    "target": str(slave.id),
-                    "plane": "data_back",
-                    "protocol": "RDMA",
-                    "bandwidth": "100GE",
-                    "status": "normal" if master.data_status == 'online' and slave.data_status == 'online' else "down",
-                    "latency": 0.1,
-                    "packet_loss": 0
-                })
-
-    # 自动生成传感器到Master的数据面前段链路
+    # ── 数据面前段：传感器 → Master（DPDK，直连） ────────────
     for sensor in sensors:
         for master in masters:
-            existing = any(
-                l.source_node_id == sensor.id and
-                l.target_node_id == master.id and
-                l.plane == 'data_front'
-                for l in links
-            )
-            if not existing:
-                graph_links.append({
-                    "source": str(sensor.id),
-                    "target": str(master.id),
-                    "plane": "data_front",
-                    "protocol": "DPDK",
-                    "bandwidth": "100GE",
-                    "status": "normal" if sensor.data_status == 'online' and master.data_status == 'online' else "down",
-                    "latency": 0.1,
-                    "packet_loss": 0
-                })
+            graph_links.append({
+                "source": str(sensor.id), "target": str(master.id),
+                "plane": "data_front", "protocol": "DPDK",
+                "bandwidth": "100GE",
+                "status": "normal" if sensor.data_status == "online" and master.data_status == "online" else "down",
+                "latency": 0.1, "packet_loss": 0
+            })
 
-    # 自动生成管理面链路（所有节点连接到管理站）
-    for node in nodes:
-        if node.bmc_ip:  # 有BMC IP的节点
-            existing_mgmt = any(
-                l.plane == 'management' and str(l.target_node_id) == str(node.id)
-                for l in links
-            )
-            if not existing_mgmt:
-                graph_links.append({
-                    "source": "mgmt-station",
-                    "target": str(node.id),
-                    "plane": "management",
-                    "protocol": "IPMI",
-                    "bandwidth": "GE",
-                    "status": "normal" if node.status == 'online' else "down",
-                    "latency": 1.0,
-                    "packet_loss": 0
-                })
+    # ── 数据面后段：Master → Slave（RDMA，直连） ─────────────
+    for master in masters:
+        for slave in slaves:
+            graph_links.append({
+                "source": str(master.id), "target": str(slave.id),
+                "plane": "data_back", "protocol": "RDMA",
+                "bandwidth": "100GE",
+                "status": "normal" if master.data_status == "online" and slave.data_status == "online" else "down",
+                "latency": 0.1, "packet_loss": 0
+            })
 
     return {
         "nodes": graph_nodes,
