@@ -5,20 +5,33 @@ Cluster Manager - FastAPI 主入口
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from sqlalchemy import text
 
-from models.node import init_db
+from models.node import init_db, engine
 from models.seed import seed_demo_data
 from api import nodes, pxe, ipmi, network, alerts, diagnose, patrol
 
 
+def _run_migrations():
+    """简单列迁移：为已存在的表添加新列"""
+    migrations = [
+        "ALTER TABLE diag_scripts ADD COLUMN script_tab VARCHAR(20) DEFAULT 'hardware'",
+    ]
+    with engine.connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时初始化数据库
     init_db()
-    # 生成演示数据
+    _run_migrations()
     seed_demo_data()
     yield
-    # 关闭时清理资源
 
 
 app = FastAPI(

@@ -352,6 +352,7 @@ def resolve_fault(fault_id: int, db: Session = Depends(get_db)):
 class DiagScriptCreate(BaseModel):
     name: str
     description: Optional[str] = ''
+    script_tab: str = 'hardware'          # business / hardware
     category: str = '通用诊断'
     script_content: str
     target_node_type: str = 'all'
@@ -363,6 +364,7 @@ class DiagScriptResponse(BaseModel):
     id: int
     name: str
     description: Optional[str]
+    script_tab: str
     category: str
     script_content: str
     target_node_type: str
@@ -376,9 +378,15 @@ class DiagScriptResponse(BaseModel):
 
 
 @router.get("/scripts", response_model=List[DiagScriptResponse])
-def list_scripts(category: Optional[str] = None, db: Session = Depends(get_db)):
+def list_scripts(
+    script_tab: Optional[str] = None,
+    category: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     """获取诊断脚本列表"""
     q = db.query(DiagScript)
+    if script_tab:
+        q = q.filter(DiagScript.script_tab == script_tab)
     if category:
         q = q.filter(DiagScript.category == category)
     return q.order_by(DiagScript.category, DiagScript.name).all()
@@ -473,62 +481,140 @@ def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depends(get_
 
 
 # ─────────────────────────────────────────────
-#  一键日志采集
+#  日志查询（按角色+类型+时间段）
 # ─────────────────────────────────────────────
 
-class LogCollectRequest(BaseModel):
-    node_ids: List[int]
-    ssh_user: str
-    ssh_password: str
-    ssh_port: int = 22
-    log_paths: List[str]
-    target_dir: str
+# 角色 → node_type 映射
+ROLE_TO_NODE_TYPE = {
+    "master":        ["master"],
+    "slave":         ["slave"],
+    "subswath":      ["subswath"],
+    "globalstorage": ["globalstorage"],
+}
+
+# 日志类型 → log_type 映射
+LOG_CATEGORY_MAP = {
+    "business": ["dpdk", "rdma", "app"],
+    "system":   ["syslog"],
+    "kernel":   ["kernel"],
+    "network":  ["rdma", "dpdk"],
+}
+
+# 示例日志模板（当DB中无真实日志时补充演示数据）
+_DEMO_LOG_TEMPLATES = {
+    "business": [
+        ("info",    "业务流程启动完成"),
+        ("info",    "数据帧处理速率: 8500 Mbps"),
+        ("warning", "丢包率超过阈值: 0.05%"),
+        ("info",    "LT流程初始化完成"),
+        ("error",   "PDA数据帧校验失败，重试中"),
+    ],
+    "system": [
+        ("info",    "systemd: Started Cluster Agent Service"),
+        ("warning", "kernel: CPU soft lockup detected"),
+        ("info",    "sshd: Accepted publickey for root"),
+        ("error",   "Out of memory: Kill process"),
+    ],
+    "kernel": [
+        ("info",    "Linux version 5.10.0-136.12.0 (openEuler)"),
+        ("warning", "ACPI: IRQ override for 0:6, enabled at level"),
+        ("error",   "EDAC MC0: 1 CE error"),
+        ("info",    "EXT4-fs: mounted filesystem"),
+    ],
+    "network": [
+        ("info",    "mlx5_core: Link up for port 0"),
+        ("warning", "RDMA: CQ overrun detected on port 1"),
+        ("info",    "ib0: RoCE link state: ACTIVE"),
+        ("error",   "mlx5e: tx timeout on queue"),
+    ],
+}
 
 
-@router.post("/log-collect")
-def collect_logs_to_windows(req: LogCollectRequest, db: Session = Depends(get_db)):
+class LogQueryRequest(BaseModel):
+    roles: List[str]              # master/slave/subswath/globalstorage
+    log_types: List[str]          # business/system/kernel/network
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+
+
+@router.post("/query-logs")
+def query_logs_by_role(req: LogQueryRequest, db: Session = Depends(get_db)):
     """
-    SSH采集OpenEuler节点日志到Windows目录。
-
-    log_paths:
-      - "/var/log/messages" 等路径 → SFTP直接下载
-      - "dmesg", "journalctl ..." 等命令 → 执行后保存输出
+    按角色、日志类型、时间段查询日志。
+    先从数据库查询真实记录，不足时补充演示数据。
     """
-    if not req.log_paths:
-        raise HTTPException(status_code=400, detail="请至少选择一项日志")
-    if not req.target_dir:
-        raise HTTPException(status_code=400, detail="请指定目标目录")
+    if not req.roles or not req.log_types:
+        raise HTTPException(status_code=400, detail="请选择角色和日志类型")
 
-    nodes = db.query(Node).filter(Node.id.in_(req.node_ids)).all()
-    if not nodes:
-        raise HTTPException(status_code=400, detail="未找到指定节点")
+    # 确定查询的 node_type 列表
+    node_types = []
+    for role in req.roles:
+        node_types.extend(ROLE_TO_NODE_TYPE.get(role, [role]))
 
-    results = []
-    for node in nodes:
-        host = node.mgmt_ip
-        if not host:
-            results.append({
-                "node": node.hostname,
-                "host": "",
-                "success": False,
-                "error": "节点无管理面IP",
-                "files": []
-            })
-            continue
+    # 确定查询的 log_type 列表
+    db_log_types = []
+    for lt in req.log_types:
+        db_log_types.extend(LOG_CATEGORY_MAP.get(lt, [lt]))
+    db_log_types = list(set(db_log_types))
 
-        result = collect_node_logs(
-            host=host,
-            port=req.ssh_port,
-            username=req.ssh_user,
-            password=req.ssh_password,
-            log_paths=req.log_paths,
-            target_dir=req.target_dir,
-            node_name=node.hostname
-        )
-        results.append(result)
+    # 查询节点
+    node_query = db.query(Node)
+    if node_types:
+        node_query = node_query.filter(Node.node_type.in_(node_types))
+    matched_nodes = node_query.all()
+    node_ids = [n.id for n in matched_nodes]
+    node_map = {n.id: n for n in matched_nodes}
 
-    total_success = sum(1 for r in results if r["success"])
+    # 查询 DB 日志
+    log_query = db.query(Log)
+    if node_ids:
+        log_query = log_query.filter(Log.node_id.in_(node_ids))
+    if db_log_types:
+        log_query = log_query.filter(Log.log_type.in_(db_log_types))
+    if req.start_time:
+        log_query = log_query.filter(Log.created_at >= req.start_time)
+    if req.end_time:
+        log_query = log_query.filter(Log.created_at <= req.end_time)
+    db_logs = log_query.order_by(Log.created_at.desc()).limit(500).all()
+
+    entries = []
+    for log in db_logs:
+        node = node_map.get(log.node_id)
+        entries.append({
+            "id": log.id,
+            "timestamp": log.created_at.isoformat() if log.created_at else None,
+            "node": node.hostname if node else f"node-{log.node_id}",
+            "role": node.node_type if node else "unknown",
+            "log_type": log.log_type,
+            "level": log.level,
+            "message": log.message,
+        })
+
+    # 若无真实日志，生成演示条目
+    if not entries:
+        demo_time = datetime.utcnow()
+        import random
+        for role in req.roles:
+            node_name = f"{role}-demo"
+            for lt in req.log_types:
+                templates = _DEMO_LOG_TEMPLATES.get(lt, [("info", "日志记录")])
+                for level, msg in templates:
+                    from datetime import timedelta
+                    ts = demo_time - timedelta(minutes=random.randint(0, 60))
+                    entries.append({
+                        "id": None,
+                        "timestamp": ts.isoformat(),
+                        "node": node_name,
+                        "role": role,
+                        "log_type": lt,
+                        "level": level,
+                        "message": msg,
+                    })
+
+    entries.sort(key=lambda x: x["timestamp"] or "", reverse=True)
     return {
-        "message": f"采集完成: {total_success}/{len(results)} 个节点成功",
-        "results": results
+        "total": len(entries),
+        "roles": req.roles,
+        "log_types": req.log_types,
+        "entries": entries
     }

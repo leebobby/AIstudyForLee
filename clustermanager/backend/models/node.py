@@ -194,6 +194,7 @@ class DiagScript(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(100))
     description = Column(Text, default='')
+    script_tab = Column(String(20), default='hardware')   # business / hardware
     category = Column(String(50), default='通用诊断')
     script_content = Column(Text)           # SSH命令或脚本内容
     target_node_type = Column(String(20), default='all')  # all/master/slave/sensor

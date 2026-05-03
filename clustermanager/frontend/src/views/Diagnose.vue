@@ -1,300 +1,217 @@
 <template>
   <div class="diagnose-view">
-    <el-tabs v-model="activeTab" type="border-card" class="main-tabs">
+    <el-tabs v-model="activeTab" class="diag-tabs">
 
-      <!-- ══════════════════════════════════════════
-           Tab 1: 故障分析
-      ══════════════════════════════════════════ -->
-      <el-tab-pane label="故障分析" name="faults">
-        <el-card>
-          <template #header>
-            <div class="card-header">
-              <span>故障点列表</span>
-              <el-button type="primary" @click="analyzeAll" :loading="analyzing">
-                <el-icon><FirstAidKit /></el-icon>
-                分析所有节点
-              </el-button>
-            </div>
-          </template>
-          <el-table :data="faultPoints" stripe>
-            <el-table-column prop="plane" label="平面" width="80">
-              <template #default="{ row }">
-                <el-tag size="small">{{ row.plane }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="fault_type" label="故障类型" width="160" />
-            <el-table-column prop="description" label="描述" />
-            <el-table-column prop="severity" label="严重性" width="90">
-              <template #default="{ row }">
-                <el-tag :type="getSeverityType(row.severity)" size="small">{{ row.severity }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="status" label="状态" width="80">
-              <template #default="{ row }">
-                <el-tag :type="getStatusType(row.status)" size="small">{{ row.status }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="created_at" label="发现时间" width="160">
-              <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
-            </el-table-column>
-            <el-table-column label="操作" width="140" fixed="right">
-              <template #default="{ row }">
-                <el-button size="small" @click="showFaultDetail(row)">详情</el-button>
-                <el-button size="small" type="success" @click="resolveFault(row)">解决</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-
-        <el-card style="margin-top:16px">
-          <template #header><span>日志查询</span></template>
-          <div class="log-filters">
-            <el-select v-model="logFilter.node_id" placeholder="节点" clearable style="width:150px">
-              <el-option v-for="n in nodes" :key="n.id" :label="n.hostname" :value="n.id" />
-            </el-select>
-            <el-select v-model="logFilter.log_type" placeholder="日志类型" clearable style="width:130px">
-              <el-option label="系统日志" value="syslog" />
-              <el-option label="内核日志" value="kernel" />
-              <el-option label="DPDK日志" value="dpdk" />
-              <el-option label="RDMA日志" value="rdma" />
-              <el-option label="BMC日志"  value="bmc"  />
-            </el-select>
-            <el-select v-model="logFilter.level" placeholder="级别" clearable style="width:90px">
-              <el-option label="ERROR"   value="error"   />
-              <el-option label="WARNING" value="warning" />
-              <el-option label="INFO"    value="info"    />
-            </el-select>
-            <el-button type="primary" @click="loadLogs">查询</el-button>
-          </div>
-          <el-table :data="logs" stripe size="small" max-height="380">
-            <el-table-column prop="log_type" label="类型" width="80" />
-            <el-table-column prop="level" label="级别" width="80">
-              <template #default="{ row }">
-                <el-tag :type="getLogLevel(row.level)" size="small">{{ row.level }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="message" label="消息" />
-            <el-table-column prop="collected_at" label="时间" width="160">
-              <template #default="{ row }">{{ formatDate(row.collected_at) }}</template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-tab-pane>
-
-      <!-- ══════════════════════════════════════════
-           Tab 2: 日志采集
-      ══════════════════════════════════════════ -->
-      <el-tab-pane label="日志采集" name="collect">
-        <el-row :gutter="16">
-          <el-col :span="14">
-            <!-- SSH 配置 -->
-            <el-card class="collect-card">
-              <template #header>
-                <span><el-icon><Setting /></el-icon> SSH 连接配置</span>
-              </template>
-              <el-form :model="collect" label-width="80px" size="default">
-                <el-form-item label="目标节点">
-                  <el-select v-model="collect.node_ids" multiple placeholder="选择节点" style="width:100%">
-                    <el-option
-                      v-for="n in nodes" :key="n.id"
-                      :label="`${n.hostname}  (${n.mgmt_ip || '无IP'})`"
-                      :value="n.id"
-                    />
-                  </el-select>
-                </el-form-item>
-                <el-row :gutter="12">
-                  <el-col :span="10">
-                    <el-form-item label="用户名">
-                      <el-input v-model="collect.ssh_user" placeholder="root" />
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="10">
-                    <el-form-item label="密码">
-                      <el-input v-model="collect.ssh_password" type="password" show-password />
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="4">
-                    <el-form-item label="端口">
-                      <el-input-number v-model="collect.ssh_port" :min="1" :max="65535" style="width:70px" />
-                    </el-form-item>
-                  </el-col>
-                </el-row>
-                <el-form-item label="目标目录">
-                  <el-input v-model="collect.target_dir" placeholder="例: D:\cluster_logs">
-                    <template #prepend><el-icon><FolderOpened /></el-icon></template>
-                  </el-input>
-                  <div class="hint">日志将保存到 &lt;目标目录&gt;\&lt;节点名&gt;\&lt;时间戳&gt;\ 下</div>
-                </el-form-item>
-              </el-form>
-            </el-card>
-
-            <!-- 日志文件选择 -->
-            <el-card class="collect-card" style="margin-top:14px">
-              <template #header><span><el-icon><Document /></el-icon> 日志文件 / 命令</span></template>
-              <div class="log-check-grid">
-                <el-checkbox
-                  v-for="item in predefinedLogs" :key="item.value"
-                  v-model="item.checked"
-                  class="log-check"
-                >
-                  <span class="log-label">{{ item.label }}</span>
-                  <span class="log-path">{{ item.value }}</span>
-                </el-checkbox>
-              </div>
-              <div class="custom-path-row" style="margin-top:12px">
-                <el-input
-                  v-model="customLogInput"
-                  placeholder="自定义路径或命令，如 /var/log/app.log 或 dmesg -T"
-                  style="flex:1"
-                  @keyup.enter="addCustomLog"
-                />
-                <el-button @click="addCustomLog" style="margin-left:8px">添加</el-button>
-              </div>
-              <div v-if="customLogs.length" style="margin-top:8px">
-                <el-tag
-                  v-for="(p, i) in customLogs" :key="i"
-                  closable @close="customLogs.splice(i,1)"
-                  style="margin:3px"
-                >{{ p }}</el-tag>
-              </div>
-            </el-card>
-
-            <div style="margin-top:16px;text-align:right">
-              <el-button
-                type="primary" size="large" :loading="collecting"
-                @click="startCollect"
-                :disabled="!collect.node_ids.length || !selectedLogPaths.length"
-              >
-                <el-icon><Download /></el-icon>
-                一键采集日志
-              </el-button>
-            </div>
-          </el-col>
-
-          <!-- 采集结果 -->
-          <el-col :span="10">
-            <el-card class="collect-card" style="min-height:460px">
-              <template #header><span>采集结果</span></template>
-              <el-empty v-if="!collectResults.length" description="尚未采集" :image-size="80" />
-              <div v-for="res in collectResults" :key="res.node" class="collect-result">
-                <div class="result-node-header">
-                  <el-icon v-if="res.success" color="#67c23a"><CircleCheck /></el-icon>
-                  <el-icon v-else color="#f56c6c"><CircleClose /></el-icon>
-                  <span class="result-node-name">{{ res.node }}</span>
-                  <el-tag size="small" :type="res.success ? 'success' : 'danger'">
-                    {{ res.host }}
-                  </el-tag>
-                </div>
-                <div v-if="res.success">
-                  <div class="result-dir">
-                    <el-icon><FolderOpened /></el-icon> {{ res.target_dir }}
-                  </div>
-                  <el-table :data="res.files" size="small" class="file-table">
-                    <el-table-column prop="path" label="来源" min-width="120" show-overflow-tooltip />
-                    <el-table-column label="状态" width="90">
-                      <template #default="{ row }">
-                        <el-tag
-                          size="small"
-                          :type="row.status === 'success' || row.status === 'success_sudo' ? 'success' : (row.status === 'not_found' ? 'info' : 'danger')"
-                        >{{ row.status }}</el-tag>
-                      </template>
-                    </el-table-column>
-                    <el-table-column prop="size_kb" label="大小(KB)" width="80" />
-                  </el-table>
-                </div>
-                <el-alert v-else :title="res.error" type="error" :closable="false" style="margin-top:6px" />
-              </div>
-            </el-card>
-          </el-col>
-        </el-row>
-      </el-tab-pane>
-
-      <!-- ══════════════════════════════════════════
-           Tab 3: 诊断脚本
-      ══════════════════════════════════════════ -->
-      <el-tab-pane label="诊断脚本" name="scripts">
-        <!-- 工具栏 -->
-        <div class="scripts-toolbar">
-          <el-button type="primary" @click="openScriptDialog(null)">
-            <el-icon><Plus /></el-icon> 新建脚本
+      <!-- ══════════════════════════════════════
+           Tab 1: 业务诊断
+      ══════════════════════════════════════ -->
+      <el-tab-pane label="业务诊断" name="business">
+        <div class="tab-toolbar">
+          <el-button type="primary" size="small" @click="openNewTypeDialog('business')">
+            <el-icon><FolderAdd /></el-icon>&nbsp;新建诊断类型
           </el-button>
-          <el-select v-model="scriptCategoryFilter" placeholder="所有分类" clearable style="width:160px">
-            <el-option v-for="c in allCategories" :key="c" :label="c" :value="c" />
-          </el-select>
-          <el-input v-model="scriptSearch" placeholder="搜索脚本名..." clearable style="width:200px">
-            <template #prefix><el-icon><Search /></el-icon></template>
-          </el-input>
+          <el-button size="small" @click="openScriptDialog(null, 'business')">
+            <el-icon><Plus /></el-icon>&nbsp;新建脚本
+          </el-button>
         </div>
 
-        <!-- 按分类展示 -->
-        <div v-if="filteredScripts.length === 0" class="no-scripts">
-          <el-empty description="暂无诊断脚本" />
+        <div v-if="!businessCategories.length" class="empty-hint">
+          暂无诊断类型，点击「新建诊断类型」开始
         </div>
-        <div v-for="category in visibleCategories" :key="category" class="category-section">
-          <div class="category-title">
-            <el-icon><Collection /></el-icon>
-            {{ category }}
+        <div v-for="cat in businessCategories" :key="'biz-' + cat" class="category-section">
+          <div class="category-header">
+            <span class="cat-bullet">▣</span>{{ cat }}
           </div>
           <div class="script-grid">
             <div
-              v-for="script in getScriptsByCategory(category)"
-              :key="script.id"
-              class="script-card"
-              :class="{ disabled: !script.enabled }"
+              v-for="s in getScripts('business', cat)" :key="s.id"
+              class="script-card" :class="{ 'script-card--disabled': !s.enabled }"
             >
               <div class="script-card-body">
-                <div class="script-name">{{ script.name }}</div>
-                <div class="script-desc">{{ script.description || '—' }}</div>
-                <div class="script-meta">
-                  <el-tag size="small" type="info">{{ script.target_node_type }}</el-tag>
-                  <span class="script-timeout">{{ script.timeout }}s</span>
+                <div class="sc-name">{{ s.name }}</div>
+                <div class="sc-desc">{{ s.description || '—' }}</div>
+                <div class="sc-meta">
+                  <el-tag size="small" type="info">{{ s.target_node_type }}</el-tag>
+                  <span class="sc-timeout">{{ s.timeout }}s</span>
                 </div>
               </div>
-              <div class="script-card-actions">
-                <el-button
-                  type="primary" size="small" :disabled="!script.enabled"
-                  @click="openRunDialog(script)"
-                >
+              <div class="script-card-footer">
+                <el-button type="primary" size="small" :disabled="!s.enabled" @click="openRunDialog(s)">
                   <el-icon><VideoPlay /></el-icon> 运行
                 </el-button>
-                <el-button size="small" @click="openScriptDialog(script)">
+                <el-button size="small" @click="openScriptDialog(s, 'business')">
                   <el-icon><Edit /></el-icon>
                 </el-button>
-                <el-button size="small" type="danger" @click="confirmDeleteScript(script)">
+                <el-button size="small" type="danger" @click="confirmDelete(s)">
                   <el-icon><Delete /></el-icon>
                 </el-button>
               </div>
             </div>
+            <div v-if="!getScripts('business', cat).length" class="script-card-empty">
+              <el-button text type="primary" @click="openScriptDialog(null, 'business', cat)">
+                <el-icon><Plus /></el-icon> 添加脚本
+              </el-button>
+            </div>
           </div>
         </div>
       </el-tab-pane>
+
+      <!-- ══════════════════════════════════════
+           Tab 2: 硬件诊断
+      ══════════════════════════════════════ -->
+      <el-tab-pane label="硬件诊断" name="hardware">
+        <div class="tab-toolbar">
+          <el-button type="primary" size="small" @click="openNewTypeDialog('hardware')">
+            <el-icon><FolderAdd /></el-icon>&nbsp;新建诊断类型
+          </el-button>
+          <el-button size="small" @click="openScriptDialog(null, 'hardware')">
+            <el-icon><Plus /></el-icon>&nbsp;新建脚本
+          </el-button>
+        </div>
+
+        <div v-if="!hardwareCategories.length" class="empty-hint">
+          暂无诊断类型，点击「新建诊断类型」开始
+        </div>
+        <div v-for="cat in hardwareCategories" :key="'hw-' + cat" class="category-section">
+          <div class="category-header">
+            <span class="cat-bullet">▣</span>{{ cat }}
+          </div>
+          <div class="script-grid">
+            <div
+              v-for="s in getScripts('hardware', cat)" :key="s.id"
+              class="script-card" :class="{ 'script-card--disabled': !s.enabled }"
+            >
+              <div class="script-card-body">
+                <div class="sc-name">{{ s.name }}</div>
+                <div class="sc-desc">{{ s.description || '—' }}</div>
+                <div class="sc-meta">
+                  <el-tag size="small" type="info">{{ s.target_node_type }}</el-tag>
+                  <span class="sc-timeout">{{ s.timeout }}s</span>
+                </div>
+              </div>
+              <div class="script-card-footer">
+                <el-button type="primary" size="small" :disabled="!s.enabled" @click="openRunDialog(s)">
+                  <el-icon><VideoPlay /></el-icon> 运行
+                </el-button>
+                <el-button size="small" @click="openScriptDialog(s, 'hardware')">
+                  <el-icon><Edit /></el-icon>
+                </el-button>
+                <el-button size="small" type="danger" @click="confirmDelete(s)">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </div>
+            </div>
+            <div v-if="!getScripts('hardware', cat).length" class="script-card-empty">
+              <el-button text type="primary" @click="openScriptDialog(null, 'hardware', cat)">
+                <el-icon><Plus /></el-icon> 添加脚本
+              </el-button>
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <!-- ══════════════════════════════════════
+           Tab 3: 日志采集
+      ══════════════════════════════════════ -->
+      <el-tab-pane label="日志采集" name="collect">
+        <el-card class="query-card">
+          <el-row :gutter="24">
+            <el-col :span="7">
+              <div class="form-section-label">角色</div>
+              <el-checkbox-group v-model="logQuery.roles" class="vert-checks">
+                <el-checkbox value="master">Master</el-checkbox>
+                <el-checkbox value="slave">Slave</el-checkbox>
+                <el-checkbox value="subswath">Subswath</el-checkbox>
+                <el-checkbox value="globalstorage">GlobalStorage</el-checkbox>
+              </el-checkbox-group>
+            </el-col>
+            <el-col :span="7">
+              <div class="form-section-label">日志目录</div>
+              <el-checkbox-group v-model="logQuery.log_types" class="vert-checks">
+                <el-checkbox value="business">业务日志</el-checkbox>
+                <el-checkbox value="system">系统日志</el-checkbox>
+                <el-checkbox value="kernel">内核日志</el-checkbox>
+                <el-checkbox value="network">网卡日志</el-checkbox>
+              </el-checkbox-group>
+            </el-col>
+            <el-col :span="10">
+              <div class="form-section-label">时间范围</div>
+              <el-date-picker
+                v-model="logQuery.time_range"
+                type="datetimerange"
+                range-separator="至"
+                start-placeholder="开始时间"
+                end-placeholder="结束时间"
+                size="small"
+                style="width:100%"
+                value-format="YYYY-MM-DDTHH:mm:ss"
+              />
+              <el-button
+                type="primary" style="margin-top:14px;width:100%"
+                @click="queryLogs" :loading="querying"
+              >
+                <el-icon><Search /></el-icon>&nbsp;查询日志
+              </el-button>
+            </el-col>
+          </el-row>
+        </el-card>
+
+        <el-card class="result-card">
+          <template #header>
+            <div class="card-header">
+              <span>采集结果</span>
+              <el-tag v-if="logResults.length" type="info" size="small">共 {{ logResults.length }} 条</el-tag>
+            </div>
+          </template>
+          <el-empty
+            v-if="!logResults.length && !querying"
+            description="选择条件后点击「查询日志」"
+            :image-size="80"
+          />
+          <el-table v-else :data="logResults" size="small" max-height="480" stripe>
+            <el-table-column prop="timestamp" label="时间" width="160">
+              <template #default="{ row }">{{ formatDate(row.timestamp) }}</template>
+            </el-table-column>
+            <el-table-column prop="node" label="节点" width="140" show-overflow-tooltip />
+            <el-table-column prop="role" label="角色" width="110">
+              <template #default="{ row }">
+                <el-tag size="small" type="info">{{ row.role }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="log_type" label="日志类型" width="90" />
+            <el-table-column prop="level" label="级别" width="80">
+              <template #default="{ row }">
+                <el-tag size="small" :type="levelColor(row.level)">{{ row.level }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="message" label="内容" show-overflow-tooltip />
+          </el-table>
+        </el-card>
+      </el-tab-pane>
     </el-tabs>
 
-    <!-- ══════════════════════════════════════════
-         故障详情对话框
-    ══════════════════════════════════════════ -->
-    <el-dialog v-model="detailDialogVisible" title="故障详情" width="600px">
-      <el-descriptions :column="2" border v-if="selectedFault">
-        <el-descriptions-item label="故障类型">{{ selectedFault.fault_type }}</el-descriptions-item>
-        <el-descriptions-item label="平面">{{ selectedFault.plane }}</el-descriptions-item>
-        <el-descriptions-item label="严重性">
-          <el-tag :type="getSeverityType(selectedFault.severity)">{{ selectedFault.severity }}</el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item label="描述">{{ selectedFault.description }}</el-descriptions-item>
-      </el-descriptions>
-      <div class="suggestions" v-if="selectedFault?.suggestions">
-        <h4>建议操作</h4>
-        <pre>{{ selectedFault.suggestions }}</pre>
-      </div>
+    <!-- ══ 新建诊断类型 ══ -->
+    <el-dialog v-model="newTypeDialog.visible" title="新建诊断类型" width="420px">
+      <el-form label-width="90px">
+        <el-form-item label="类型名称">
+          <el-input
+            v-model="newTypeDialog.name"
+            placeholder="如: 性能诊断"
+            @keyup.enter="confirmNewType"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="newTypeDialog.visible = false">取消</el-button>
+        <el-button type="primary" @click="confirmNewType">创建</el-button>
+      </template>
     </el-dialog>
 
-    <!-- ══════════════════════════════════════════
-         脚本新建/编辑对话框
-    ══════════════════════════════════════════ -->
+    <!-- ══ 脚本新建/编辑 ══ -->
     <el-dialog
-      v-model="scriptDialogVisible"
-      :title="editingScript ? '编辑诊断脚本' : '新建诊断脚本'"
-      width="660px"
+      v-model="scriptDialog.visible"
+      :title="scriptDialog.editing ? '编辑脚本' : '新建脚本'"
+      width="700px"
     >
       <el-form :model="scriptForm" label-width="90px">
         <el-form-item label="脚本名称" required>
@@ -302,11 +219,11 @@
         </el-form-item>
         <el-row :gutter="12">
           <el-col :span="14">
-            <el-form-item label="分类">
+            <el-form-item label="所属分类">
               <el-autocomplete
                 v-model="scriptForm.category"
-                :fetch-suggestions="suggestCategories"
-                placeholder="如: 网络诊断"
+                :fetch-suggestions="suggestCats"
+                placeholder="选择或输入分类"
                 style="width:100%"
               />
             </el-form-item>
@@ -314,10 +231,10 @@
           <el-col :span="10">
             <el-form-item label="节点类型">
               <el-select v-model="scriptForm.target_node_type" style="width:100%">
-                <el-option label="所有节点"   value="all"    />
-                <el-option label="Master节点" value="master" />
-                <el-option label="Slave节点"  value="slave"  />
-                <el-option label="Sensor节点" value="sensor" />
+                <el-option label="所有节点" value="all" />
+                <el-option label="Master" value="master" />
+                <el-option label="Slave" value="slave" />
+                <el-option label="Sensor" value="sensor" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -328,30 +245,44 @@
         <el-form-item label="脚本内容" required>
           <el-input
             v-model="scriptForm.script_content"
-            type="textarea" :rows="8"
-            class="code-input"
-            placeholder="输入 SSH 命令或多行 shell 脚本，将在目标节点上执行"
+            type="textarea" :rows="10"
+            class="code-textarea"
+            placeholder="输入 SSH 命令或 shell 脚本，将在目标节点上远程执行"
           />
+          <div class="import-hint">
+            <input
+              ref="fileInputRef" type="file"
+              style="display:none" accept=".sh,.py,.bash,.txt"
+              @change="onFileImport"
+            />
+            <el-button text type="primary" size="small" @click="fileInputRef.click()">
+              <el-icon><Upload /></el-icon> 导入本地脚本文件
+            </el-button>
+          </div>
         </el-form-item>
-        <el-form-item label="超时(秒)">
-          <el-input-number v-model="scriptForm.timeout" :min="5" :max="600" />
-        </el-form-item>
-        <el-form-item label="启用">
-          <el-switch v-model="scriptForm.enabled" />
-        </el-form-item>
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="超时(秒)">
+              <el-input-number v-model="scriptForm.timeout" :min="5" :max="600" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="启用">
+              <el-switch v-model="scriptForm.enabled" />
+            </el-form-item>
+          </el-col>
+        </el-row>
       </el-form>
       <template #footer>
-        <el-button @click="scriptDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveScript" :loading="savingScript">保存</el-button>
+        <el-button @click="scriptDialog.visible = false">取消</el-button>
+        <el-button type="primary" @click="saveScript" :loading="saving">保存</el-button>
       </template>
     </el-dialog>
 
-    <!-- ══════════════════════════════════════════
-         运行脚本对话框
-    ══════════════════════════════════════════ -->
+    <!-- ══ 运行脚本 ══ -->
     <el-dialog
-      v-model="runDialogVisible"
-      :title="`运行脚本: ${runningScript?.name}`"
+      v-model="runDialog.visible"
+      :title="`运行: ${runDialog.script?.name}`"
       width="780px"
       @closed="runResults = []"
     >
@@ -359,49 +290,42 @@
         <el-form-item label="目标节点">
           <el-select
             v-model="runForm.node_ids" multiple collapse-tags
-            placeholder="选择节点" style="width:260px"
+            style="width:230px" placeholder="选择节点"
           >
             <el-option
-              v-for="n in nodesForRun" :key="n.id"
-              :label="`${n.hostname} (${n.mgmt_ip || '无IP'})`"
-              :value="n.id"
+              v-for="n in nodes" :key="n.id"
+              :label="`${n.hostname} (${n.mgmt_ip || '无IP'})`" :value="n.id"
             />
           </el-select>
         </el-form-item>
         <el-form-item label="用户名">
-          <el-input v-model="runForm.ssh_user" placeholder="root" style="width:100px" />
+          <el-input v-model="runForm.ssh_user" placeholder="root" style="width:90px" />
         </el-form-item>
         <el-form-item label="密码">
           <el-input v-model="runForm.ssh_password" type="password" show-password style="width:120px" />
         </el-form-item>
         <el-form-item label="端口">
-          <el-input-number v-model="runForm.ssh_port" :min="1" :max="65535" style="width:80px" />
+          <el-input-number v-model="runForm.ssh_port" :min="1" :max="65535" style="width:85px" />
         </el-form-item>
       </el-form>
 
-      <div class="run-script-preview">
-        <pre>{{ runningScript?.script_content }}</pre>
-      </div>
+      <pre class="script-preview">{{ runDialog.script?.script_content }}</pre>
 
       <el-button
-        type="primary" :loading="running" @click="executeScript"
-        :disabled="!runForm.node_ids.length"
+        type="primary" :loading="running"
+        @click="executeScript" :disabled="!runForm.node_ids.length"
         style="margin-bottom:14px"
       >
-        <el-icon><VideoPlay /></el-icon> 执行
+        <el-icon><VideoPlay /></el-icon>&nbsp;执行
       </el-button>
 
-      <!-- 执行结果 -->
-      <div v-for="res in runResults" :key="res.node_id" class="run-result-block">
-        <div class="run-result-header">
-          <span class="run-result-host">{{ res.hostname }}</span>
-          <el-tag :type="res.success ? 'success' : 'danger'" size="small">
-            exit {{ res.exit_code }}
-          </el-tag>
+      <div v-for="res in runResults" :key="res.node_id" class="run-result">
+        <div class="run-result-title">
+          <span>{{ res.hostname }}</span>
+          <el-tag size="small" :type="res.success ? 'success' : 'danger'">exit {{ res.exit_code }}</el-tag>
         </div>
-        <pre class="run-stdout" v-if="res.stdout">{{ res.stdout }}</pre>
-        <pre class="run-stderr" v-if="res.stderr">{{ res.stderr }}</pre>
-        <div v-if="!res.stdout && !res.stderr" class="run-empty">(无输出)</div>
+        <pre class="run-stdout">{{ res.stdout || '(无输出)' }}</pre>
+        <pre v-if="res.stderr" class="run-stderr">{{ res.stderr }}</pre>
       </div>
     </el-dialog>
   </div>
@@ -412,196 +336,105 @@ import { ref, computed, onMounted } from 'vue'
 import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-// ─── 全局状态 ───
-const activeTab = ref('faults')
+// ─── 节点 ───
 const nodes = ref([])
 
-// ─── Tab1: 故障分析 ───
-const faultPoints = ref([])
-const logs = ref([])
-const analyzing = ref(false)
-const detailDialogVisible = ref(false)
-const selectedFault = ref(null)
-const logFilter = ref({ node_id: '', log_type: '', level: '' })
+// ─── Tab ───
+const activeTab = ref('business')
 
-// ─── Tab2: 日志采集 ───
-const collect = ref({
-  node_ids: [],
-  ssh_user: 'root',
-  ssh_password: '',
-  ssh_port: 22,
-  target_dir: 'D:\\cluster_logs'
-})
-const predefinedLogs = ref([
-  { label: '系统日志',     value: '/var/log/messages',      checked: true  },
-  { label: '安全日志',     value: '/var/log/secure',         checked: true  },
-  { label: '内核日志',     value: '/var/log/kern.log',       checked: false },
-  { label: 'dmesg 输出',  value: 'dmesg',                    checked: true  },
-  { label: '审计日志',     value: '/var/log/audit/audit.log',checked: false },
-  { label: 'journalctl',  value: 'journalctl --no-pager -n 2000', checked: false },
-])
-const customLogInput = ref('')
-const customLogs = ref([])
-const collecting = ref(false)
-const collectResults = ref([])
-
-const selectedLogPaths = computed(() => [
-  ...predefinedLogs.value.filter(l => l.checked).map(l => l.value),
-  ...customLogs.value
-])
-
-// ─── Tab3: 诊断脚本 ───
+// ─── 脚本数据 ───
 const scripts = ref([])
-const scriptCategoryFilter = ref('')
-const scriptSearch = ref('')
-const scriptDialogVisible = ref(false)
-const editingScript = ref(null)
-const savingScript = ref(false)
-const scriptForm = ref(defaultScriptForm())
 
-const runDialogVisible = ref(false)
-const runningScript = ref(null)
-const running = ref(false)
-const runResults = ref([])
-const runForm = ref({ node_ids: [], ssh_user: 'root', ssh_password: '', ssh_port: 22 })
+function getScripts(tab, cat) {
+  return scripts.value.filter(s => s.script_tab === tab && s.category === cat)
+}
 
-// ─── Computed ───
-const allCategories = computed(() => [...new Set(scripts.value.map(s => s.category))])
+// ─── 分类管理 ───
+const DEFAULT_CATS = {
+  business: ['初始化', '检测流程', 'LT流程', 'PDA流程'],
+  hardware: ['存储诊断', '设备诊断', '网络诊断', '系统诊断'],
+}
 
-const filteredScripts = computed(() => {
-  return scripts.value.filter(s => {
-    const matchCat = !scriptCategoryFilter.value || s.category === scriptCategoryFilter.value
-    const matchSearch = !scriptSearch.value ||
-      s.name.toLowerCase().includes(scriptSearch.value.toLowerCase()) ||
-      (s.description || '').toLowerCase().includes(scriptSearch.value.toLowerCase())
-    return matchCat && matchSearch
-  })
+function loadUserCats(tab) {
+  try { return JSON.parse(localStorage.getItem(`diag_cats_${tab}`) || '[]') } catch { return [] }
+}
+function saveUserCats(tab, list) {
+  localStorage.setItem(`diag_cats_${tab}`, JSON.stringify(list))
+}
+
+const userBusinessCats = ref(loadUserCats('business'))
+const userHardwareCats = ref(loadUserCats('hardware'))
+
+const businessCategories = computed(() => {
+  const fromScripts = scripts.value.filter(s => s.script_tab === 'business').map(s => s.category)
+  return [...new Set([...DEFAULT_CATS.business, ...userBusinessCats.value, ...fromScripts])]
+})
+const hardwareCategories = computed(() => {
+  const fromScripts = scripts.value.filter(s => s.script_tab === 'hardware').map(s => s.category)
+  return [...new Set([...DEFAULT_CATS.hardware, ...userHardwareCats.value, ...fromScripts])]
 })
 
-const visibleCategories = computed(() => {
-  const cats = filteredScripts.value.map(s => s.category)
-  return [...new Set(cats)]
-})
+// ─── 新建类型 ───
+const newTypeDialog = ref({ visible: false, name: '', tab: 'business' })
 
-const nodesForRun = computed(() => {
-  if (!runningScript.value || runningScript.value.target_node_type === 'all') return nodes.value
-  return nodes.value.filter(n => n.node_type === runningScript.value.target_node_type)
-})
+function openNewTypeDialog(tab) {
+  newTypeDialog.value = { visible: true, name: '', tab }
+}
+function confirmNewType() {
+  const name = newTypeDialog.value.name.trim()
+  if (!name) { ElMessage.warning('请输入类型名称'); return }
+  const tab = newTypeDialog.value.tab
+  if (tab === 'business') {
+    if (!businessCategories.value.includes(name)) {
+      userBusinessCats.value.push(name)
+      saveUserCats('business', userBusinessCats.value)
+    }
+  } else {
+    if (!hardwareCategories.value.includes(name)) {
+      userHardwareCats.value.push(name)
+      saveUserCats('hardware', userHardwareCats.value)
+    }
+  }
+  ElMessage.success(`已创建「${name}」`)
+  newTypeDialog.value.visible = false
+}
 
-// ─── Helpers ───
-function defaultScriptForm() {
+// ─── 脚本 CRUD ───
+const scriptDialog = ref({ visible: false, editing: null, tab: 'business' })
+const saving = ref(false)
+const fileInputRef = ref(null)
+
+function defaultForm(tab = 'business', cat = '') {
   return {
-    name: '', description: '', category: '通用诊断',
+    name: '', description: '',
+    script_tab: tab,
+    category: cat || (tab === 'business' ? DEFAULT_CATS.business[0] : DEFAULT_CATS.hardware[0]),
     script_content: '', target_node_type: 'all',
     timeout: 30, enabled: true
   }
 }
+const scriptForm = ref(defaultForm())
 
-const getSeverityType = s => ({ critical: 'danger', warning: 'warning', info: 'info' }[s] || 'info')
-const getStatusType   = s => ({ active: 'danger', resolved: 'success' }[s] || 'info')
-const getLogLevel     = l => ({ error: 'danger', warning: 'warning', info: 'info' }[l] || 'info')
-const formatDate      = d => d ? new Date(d).toLocaleString() : ''
-
-function getScriptsByCategory(cat) {
-  return filteredScripts.value.filter(s => s.category === cat)
+function openScriptDialog(script, tab, presetCat = '') {
+  scriptDialog.value = { visible: true, editing: script, tab }
+  scriptForm.value = script ? { ...script } : defaultForm(tab, presetCat)
 }
 
-function suggestCategories(query, cb) {
-  const cats = allCategories.value.filter(c => c.toLowerCase().includes((query || '').toLowerCase()))
-  cb(cats.map(c => ({ value: c })))
+function suggestCats(query, cb) {
+  const cats = scriptDialog.value.tab === 'business' ? businessCategories.value : hardwareCategories.value
+  cb(cats.filter(c => c.includes(query || '')).map(c => ({ value: c })))
 }
 
-function addCustomLog() {
-  const v = customLogInput.value.trim()
-  if (v && !customLogs.value.includes(v)) customLogs.value.push(v)
-  customLogInput.value = ''
-}
-
-// ─── Tab1 Actions ───
-async function loadFaultPoints() {
-  try {
-    const res = await axios.get('/api/diagnose/faults')
-    faultPoints.value = res.data
-  } catch { ElMessage.error('获取故障点失败') }
-}
-
-async function loadNodes() {
-  try {
-    const res = await axios.get('/api/nodes')
-    nodes.value = res.data
-  } catch { console.error('获取节点失败') }
-}
-
-async function analyzeAll() {
-  analyzing.value = true
-  try {
-    const res = await axios.post('/api/diagnose/analyze')
-    ElMessage.success(`分析完成，发现 ${res.data.faults_found} 个故障`)
-    loadFaultPoints()
-  } catch { ElMessage.error('分析失败') }
-  finally { analyzing.value = false }
-}
-
-async function loadLogs() {
-  try {
-    const params = {}
-    if (logFilter.value.node_id) params.node_id = logFilter.value.node_id
-    if (logFilter.value.log_type) params.log_type = logFilter.value.log_type
-    if (logFilter.value.level) params.level = logFilter.value.level
-    const res = await axios.get('/api/diagnose/logs', { params })
-    logs.value = res.data
-  } catch { ElMessage.error('获取日志失败') }
-}
-
-function showFaultDetail(fault) {
-  selectedFault.value = fault
-  detailDialogVisible.value = true
-}
-
-async function resolveFault(fault) {
-  try {
-    await axios.post(`/api/diagnose/faults/${fault.id}/resolve`)
-    ElMessage.success('故障已标记为解决')
-    loadFaultPoints()
-  } catch { ElMessage.error('操作失败') }
-}
-
-// ─── Tab2 Actions ───
-async function startCollect() {
-  if (!collect.value.target_dir.trim()) {
-    ElMessage.warning('请填写目标目录')
-    return
+function onFileImport(event) {
+  const file = event.target.files[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = e => {
+    scriptForm.value.script_content = e.target.result
+    ElMessage.success(`已导入: ${file.name}`)
   }
-  collecting.value = true
-  collectResults.value = []
-  try {
-    const res = await axios.post('/api/diagnose/log-collect', {
-      ...collect.value,
-      log_paths: selectedLogPaths.value
-    })
-    collectResults.value = res.data.results
-    ElMessage.success(res.data.message)
-  } catch (e) {
-    ElMessage.error(e.response?.data?.detail || '采集失败')
-  } finally {
-    collecting.value = false
-  }
-}
-
-// ─── Tab3 Actions ───
-async function loadScripts() {
-  try {
-    const res = await axios.get('/api/diagnose/scripts')
-    scripts.value = res.data
-  } catch { ElMessage.error('获取脚本列表失败') }
-}
-
-function openScriptDialog(script) {
-  editingScript.value = script
-  scriptForm.value = script
-    ? { ...script }
-    : defaultScriptForm()
-  scriptDialogVisible.value = true
+  reader.readAsText(file, 'utf-8')
+  event.target.value = ''
 }
 
 async function saveScript() {
@@ -609,30 +442,29 @@ async function saveScript() {
     ElMessage.warning('脚本名称和内容不能为空')
     return
   }
-  savingScript.value = true
+  saving.value = true
   try {
-    if (editingScript.value) {
-      await axios.put(`/api/diagnose/scripts/${editingScript.value.id}`, scriptForm.value)
+    if (scriptDialog.value.editing) {
+      await axios.put(`/api/diagnose/scripts/${scriptDialog.value.editing.id}`, scriptForm.value)
       ElMessage.success('更新成功')
     } else {
       await axios.post('/api/diagnose/scripts', scriptForm.value)
       ElMessage.success('创建成功')
     }
-    scriptDialogVisible.value = false
+    scriptDialog.value.visible = false
     loadScripts()
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '保存失败')
   } finally {
-    savingScript.value = false
+    saving.value = false
   }
 }
 
-async function confirmDeleteScript(script) {
+async function confirmDelete(script) {
   try {
-    await ElMessageBox.confirm(
-      `确定删除脚本「${script.name}」？`,
-      '删除确认', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
+    await ElMessageBox.confirm(`确定删除「${script.name}」？`, '删除确认', {
+      type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消'
+    })
     await axios.delete(`/api/diagnose/scripts/${script.id}`)
     ElMessage.success('已删除')
     loadScripts()
@@ -641,34 +473,31 @@ async function confirmDeleteScript(script) {
   }
 }
 
+// ─── 运行脚本 ───
+const runDialog = ref({ visible: false, script: null })
+const runForm = ref({ node_ids: [], ssh_user: 'root', ssh_password: '', ssh_port: 22 })
+const running = ref(false)
+const runResults = ref([])
+
 function openRunDialog(script) {
-  runningScript.value = script
+  runDialog.value = { visible: true, script }
   runResults.value = []
-  // 预填 SSH 配置（复用采集配置）
-  runForm.value = {
-    node_ids: [],
-    ssh_user: collect.value.ssh_user,
-    ssh_password: collect.value.ssh_password,
-    ssh_port: collect.value.ssh_port
-  }
-  runDialogVisible.value = true
 }
 
 async function executeScript() {
-  if (!runForm.value.node_ids.length) {
-    ElMessage.warning('请至少选择一个节点')
-    return
-  }
+  if (!runForm.value.node_ids.length) { ElMessage.warning('请选择节点'); return }
   running.value = true
   runResults.value = []
   try {
     const res = await axios.post(
-      `/api/diagnose/scripts/${runningScript.value.id}/run`,
+      `/api/diagnose/scripts/${runDialog.value.script.id}/run`,
       runForm.value
     )
     runResults.value = res.data.results
     const ok = runResults.value.filter(r => r.success).length
-    ElMessage.success(`执行完成: ${ok}/${runResults.value.length} 个节点成功`)
+    ElMessage[ok === runResults.value.length ? 'success' : 'warning'](
+      `执行完成: ${ok}/${runResults.value.length} 个节点成功`
+    )
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '执行失败')
   } finally {
@@ -676,162 +505,236 @@ async function executeScript() {
   }
 }
 
+// ─── 日志查询 ───
+const logQuery = ref({ roles: ['master'], log_types: ['system'], time_range: null })
+const querying = ref(false)
+const logResults = ref([])
+
+async function queryLogs() {
+  if (!logQuery.value.roles.length || !logQuery.value.log_types.length) {
+    ElMessage.warning('请至少选择一个角色和一个日志类型')
+    return
+  }
+  querying.value = true
+  logResults.value = []
+  try {
+    const payload = {
+      roles: logQuery.value.roles,
+      log_types: logQuery.value.log_types,
+      start_time: logQuery.value.time_range?.[0] || null,
+      end_time: logQuery.value.time_range?.[1] || null,
+    }
+    const res = await axios.post('/api/diagnose/query-logs', payload)
+    logResults.value = res.data.entries
+    ElMessage.success(`查询到 ${res.data.total} 条日志`)
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '查询失败')
+  } finally {
+    querying.value = false
+  }
+}
+
+// ─── Helpers ───
+const levelColor = l => ({ error: 'danger', warning: 'warning', info: 'success', debug: 'info' }[l] || 'info')
+const formatDate = d => d ? new Date(d).toLocaleString() : ''
+
 // ─── Init ───
+async function loadScripts() {
+  try {
+    const res = await axios.get('/api/diagnose/scripts')
+    scripts.value = res.data
+  } catch { ElMessage.error('加载脚本失败') }
+}
+
+async function loadNodes() {
+  try {
+    const res = await axios.get('/api/nodes')
+    nodes.value = res.data
+  } catch { /* ignore */ }
+}
+
 onMounted(() => {
-  loadFaultPoints()
-  loadNodes()
-  loadLogs()
   loadScripts()
+  loadNodes()
 })
 </script>
 
 <style scoped>
+/* ─── 整体 ─── */
 .diagnose-view {
+  height: 100%;
   display: flex;
   flex-direction: column;
-  height: 100%;
 }
 
-.main-tabs {
-  flex: 1;
+/* ─── Tabs 深色风格 ─── */
+.diag-tabs { flex: 1; }
+
+.diag-tabs :deep(.el-tabs__header) {
+  background: #16213e;
+  border-bottom: 2px solid #0f3460;
+  margin-bottom: 0;
+  padding: 0 4px;
+}
+.diag-tabs :deep(.el-tabs__nav-wrap::after) {
+  background-color: transparent;
+}
+.diag-tabs :deep(.el-tabs__item) {
+  color: #8899aa;
+  height: 46px;
+  line-height: 46px;
+  padding: 0 26px;
+  font-size: 14px;
+  letter-spacing: 0.3px;
+}
+.diag-tabs :deep(.el-tabs__item:hover) { color: #e94560; }
+.diag-tabs :deep(.el-tabs__item.is-active) {
+  color: #e94560;
+  font-weight: 600;
+}
+.diag-tabs :deep(.el-tabs__active-bar) { background-color: #e94560; }
+.diag-tabs :deep(.el-tabs__content) {
+  padding: 20px;
+  background: transparent;
+  overflow-y: auto;
 }
 
-/* ── Fault ── */
-.card-header { display: flex; justify-content: space-between; align-items: center; }
-.log-filters { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+/* ─── Toolbar ─── */
+.tab-toolbar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 22px;
+}
 
-.suggestions { margin-top: 18px; padding: 14px; background: #0f3460; border-radius: 8px; }
-.suggestions h4 { color: #e94560; margin: 0 0 8px; }
-.suggestions pre { color: #fff; white-space: pre-wrap; margin: 0; }
-
-/* ── Collect ── */
-.collect-card :deep(.el-card__header) { padding: 10px 16px; font-size: 13px; }
-
-.log-check-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
+/* ─── 分类区块 ─── */
+.empty-hint {
+  color: #666;
+  padding: 40px;
+  text-align: center;
+}
+.category-section { margin-bottom: 30px; }
+.category-header {
+  display: flex;
+  align-items: center;
   gap: 8px;
-}
-.log-check { display: flex; flex-direction: column; }
-.log-label { font-weight: 500; font-size: 13px; }
-.log-path { font-size: 11px; color: #909399; margin-top: 1px; font-family: monospace; }
-
-.custom-path-row { display: flex; align-items: center; }
-
-.hint { font-size: 11px; color: #909399; margin-top: 4px; }
-
-.collect-result {
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
-  padding: 10px 12px;
-  margin-bottom: 12px;
-}
-.result-node-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.result-node-name { font-weight: 600; font-size: 14px; flex: 1; }
-.result-dir { font-size: 11px; color: #606266; margin-bottom: 6px; display: flex; align-items: center; gap: 4px; }
-.file-table { font-size: 12px; }
-
-/* ── Scripts ── */
-.scripts-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 18px;
-}
-
-.no-scripts { padding: 40px; }
-
-.category-section { margin-bottom: 24px; }
-.category-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  color: #fff;
   font-size: 14px;
   font-weight: 600;
-  color: #303133;
-  margin-bottom: 10px;
-  padding-bottom: 6px;
+  margin-bottom: 14px;
+  padding-bottom: 8px;
   border-bottom: 2px solid #e94560;
 }
+.cat-bullet { color: #e94560; font-size: 15px; }
 
+/* ─── 脚本卡片 ─── */
 .script-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 12px;
 }
-
 .script-card {
-  border: 1px solid #e4e7ed;
+  background: #0f3460;
+  border: 1px solid rgba(233, 69, 96, 0.2);
   border-radius: 8px;
   padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  transition: box-shadow 0.2s, border-color 0.2s;
-  background: #fff;
+  gap: 12px;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 .script-card:hover {
-  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-  border-color: #409eff;
+  border-color: #e94560;
+  box-shadow: 0 4px 14px rgba(233, 69, 96, 0.18);
 }
-.script-card.disabled { opacity: 0.55; }
+.script-card--disabled { opacity: 0.5; }
 
 .script-card-body { flex: 1; }
-.script-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; color: #1d2129; }
-.script-desc { font-size: 12px; color: #606266; min-height: 32px; line-height: 1.5; }
-.script-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
-.script-timeout { font-size: 11px; color: #909399; }
+.sc-name { font-weight: 600; font-size: 14px; color: #fff; margin-bottom: 4px; }
+.sc-desc { font-size: 12px; color: #8899aa; min-height: 34px; line-height: 1.6; }
+.sc-meta { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.sc-timeout { font-size: 11px; color: #556; }
 
-.script-card-actions { display: flex; gap: 6px; }
+.script-card-footer { display: flex; gap: 6px; }
 
-/* ── Run Dialog ── */
+.script-card-empty {
+  border: 1px dashed rgba(233, 69, 96, 0.3);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 110px;
+  color: #556;
+}
+
+/* ─── 日志采集 ─── */
+.query-card { margin-bottom: 16px; }
+.form-section-label {
+  color: #a0a0a0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.vert-checks { display: flex; flex-direction: column; gap: 10px; }
+.vert-checks :deep(.el-checkbox__label) { color: #d0d0d0; }
+
+.card-header { display: flex; justify-content: space-between; align-items: center; }
+
+/* ─── 脚本编辑 ─── */
+.code-textarea :deep(textarea) {
+  font-family: 'Consolas', 'Monaco', monospace !important;
+  font-size: 13px;
+  background: #0d1117;
+  color: #c9d1d9;
+  border-color: #30363d;
+}
+.import-hint { margin-top: 6px; }
+
+/* ─── 运行对话框 ─── */
 .run-form { flex-wrap: wrap; gap: 4px; }
-.run-script-preview {
-  background: #1e1e1e;
+.script-preview {
+  background: #0d1117;
+  color: #8b949e;
+  border: 1px solid #30363d;
   border-radius: 6px;
   padding: 12px 14px;
-  margin-bottom: 14px;
-  max-height: 120px;
-  overflow: auto;
-}
-.run-script-preview pre {
-  color: #d4d4d4;
   font-family: 'Consolas', monospace;
   font-size: 12px;
-  margin: 0;
   white-space: pre-wrap;
-}
-
-.run-result-block {
+  max-height: 120px;
+  overflow: auto;
   margin-bottom: 14px;
-  border: 1px solid #e4e7ed;
+}
+.run-result {
+  margin-bottom: 14px;
+  border: 1px solid #0f3460;
   border-radius: 6px;
   overflow: hidden;
 }
-.run-result-header {
+.run-result-title {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  background: #f5f7fa;
-  border-bottom: 1px solid #e4e7ed;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: #0f3460;
+  color: #fff;
   font-weight: 500;
 }
-.run-result-host { flex: 1; }
 .run-stdout {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: #0d1117;
+  color: #c9d1d9;
   font-family: 'Consolas', monospace;
   font-size: 12px;
   margin: 0;
   padding: 10px 14px;
   white-space: pre-wrap;
-  max-height: 280px;
+  max-height: 300px;
   overflow: auto;
 }
 .run-stderr {
-  background: #2d1b1b;
-  color: #ff8080;
+  background: #1c0a0a;
+  color: #ff7b7b;
   font-family: 'Consolas', monospace;
   font-size: 12px;
   margin: 0;
@@ -840,6 +743,4 @@ onMounted(() => {
   max-height: 140px;
   overflow: auto;
 }
-.run-empty { padding: 10px 14px; color: #909399; font-size: 12px; font-style: italic; }
-.code-input :deep(textarea) { font-family: 'Consolas', monospace !important; font-size: 13px; }
 </style>
