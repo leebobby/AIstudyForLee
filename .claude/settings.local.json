@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(Get-ChildItem -Recurse \"d:\\\\01.code\\\\00.AIstudy\\\\AIstudyForLee\\\\clustermanager\\\\\" -ErrorAction SilentlyContinue | Select-Object -First 50 | Format-Table FullName)",
+      "Bash(python -c \"from models.node import DiagScript, Base; print\\('DiagScript model OK'\\); from services.diag_service import run_ssh_command, collect_node_logs; print\\('diag_service OK'\\)\")"
     ]
   }
 }

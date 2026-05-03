@@ -8,8 +8,9 @@ from typing import List, Optional
 from datetime import datetime
 import re
 
-from models.node import Node, Log, FaultPoint, DPDKStats, RDMAStats, get_db
+from models.node import Node, Log, FaultPoint, DPDKStats, RDMAStats, DiagScript, get_db
 from pydantic import BaseModel
+from services.diag_service import run_ssh_command, collect_node_logs
 
 
 router = APIRouter()
@@ -342,3 +343,192 @@ def resolve_fault(fault_id: int, db: Session = Depends(get_db)):
     db.commit()
 
     return {"message": "故障已标记为解决", "fault_id": fault_id}
+
+
+# ─────────────────────────────────────────────
+#  诊断脚本 CRUD
+# ─────────────────────────────────────────────
+
+class DiagScriptCreate(BaseModel):
+    name: str
+    description: Optional[str] = ''
+    category: str = '通用诊断'
+    script_content: str
+    target_node_type: str = 'all'
+    timeout: int = 30
+    enabled: bool = True
+
+
+class DiagScriptResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str]
+    category: str
+    script_content: str
+    target_node_type: str
+    timeout: int
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/scripts", response_model=List[DiagScriptResponse])
+def list_scripts(category: Optional[str] = None, db: Session = Depends(get_db)):
+    """获取诊断脚本列表"""
+    q = db.query(DiagScript)
+    if category:
+        q = q.filter(DiagScript.category == category)
+    return q.order_by(DiagScript.category, DiagScript.name).all()
+
+
+@router.post("/scripts", response_model=DiagScriptResponse)
+def create_script(data: DiagScriptCreate, db: Session = Depends(get_db)):
+    """新建诊断脚本"""
+    script = DiagScript(**data.model_dump())
+    db.add(script)
+    db.commit()
+    db.refresh(script)
+    return script
+
+
+@router.put("/scripts/{script_id}", response_model=DiagScriptResponse)
+def update_script(script_id: int, data: DiagScriptCreate, db: Session = Depends(get_db)):
+    """更新诊断脚本"""
+    script = db.query(DiagScript).filter(DiagScript.id == script_id).first()
+    if not script:
+        raise HTTPException(status_code=404, detail="脚本不存在")
+    for k, v in data.model_dump().items():
+        setattr(script, k, v)
+    script.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(script)
+    return script
+
+
+@router.delete("/scripts/{script_id}")
+def delete_script(script_id: int, db: Session = Depends(get_db)):
+    """删除诊断脚本"""
+    script = db.query(DiagScript).filter(DiagScript.id == script_id).first()
+    if not script:
+        raise HTTPException(status_code=404, detail="脚本不存在")
+    db.delete(script)
+    db.commit()
+    return {"message": "删除成功", "script_id": script_id}
+
+
+class ScriptRunRequest(BaseModel):
+    node_ids: List[int]
+    ssh_user: str
+    ssh_password: str
+    ssh_port: int = 22
+
+
+@router.post("/scripts/{script_id}/run")
+def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depends(get_db)):
+    """在指定节点上执行诊断脚本"""
+    script = db.query(DiagScript).filter(DiagScript.id == script_id).first()
+    if not script:
+        raise HTTPException(status_code=404, detail="脚本不存在")
+
+    nodes = db.query(Node).filter(Node.id.in_(req.node_ids)).all()
+    if not nodes:
+        raise HTTPException(status_code=400, detail="未找到指定节点")
+
+    results = []
+    for node in nodes:
+        host = node.mgmt_ip
+        if not host:
+            results.append({
+                "node_id": node.id,
+                "hostname": node.hostname,
+                "success": False,
+                "stdout": "",
+                "stderr": "节点无管理面IP",
+                "exit_code": -1
+            })
+            continue
+
+        result = run_ssh_command(
+            host=host,
+            port=req.ssh_port,
+            username=req.ssh_user,
+            password=req.ssh_password,
+            command=script.script_content,
+            timeout=script.timeout
+        )
+        results.append({
+            "node_id": node.id,
+            "hostname": node.hostname,
+            **result
+        })
+
+    return {
+        "script_id": script_id,
+        "script_name": script.name,
+        "results": results
+    }
+
+
+# ─────────────────────────────────────────────
+#  一键日志采集
+# ─────────────────────────────────────────────
+
+class LogCollectRequest(BaseModel):
+    node_ids: List[int]
+    ssh_user: str
+    ssh_password: str
+    ssh_port: int = 22
+    log_paths: List[str]
+    target_dir: str
+
+
+@router.post("/log-collect")
+def collect_logs_to_windows(req: LogCollectRequest, db: Session = Depends(get_db)):
+    """
+    SSH采集OpenEuler节点日志到Windows目录。
+
+    log_paths:
+      - "/var/log/messages" 等路径 → SFTP直接下载
+      - "dmesg", "journalctl ..." 等命令 → 执行后保存输出
+    """
+    if not req.log_paths:
+        raise HTTPException(status_code=400, detail="请至少选择一项日志")
+    if not req.target_dir:
+        raise HTTPException(status_code=400, detail="请指定目标目录")
+
+    nodes = db.query(Node).filter(Node.id.in_(req.node_ids)).all()
+    if not nodes:
+        raise HTTPException(status_code=400, detail="未找到指定节点")
+
+    results = []
+    for node in nodes:
+        host = node.mgmt_ip
+        if not host:
+            results.append({
+                "node": node.hostname,
+                "host": "",
+                "success": False,
+                "error": "节点无管理面IP",
+                "files": []
+            })
+            continue
+
+        result = collect_node_logs(
+            host=host,
+            port=req.ssh_port,
+            username=req.ssh_user,
+            password=req.ssh_password,
+            log_paths=req.log_paths,
+            target_dir=req.target_dir,
+            node_name=node.hostname
+        )
+        results.append(result)
+
+    total_success = sum(1 for r in results if r["success"])
+    return {
+        "message": f"采集完成: {total_success}/{len(results)} 个节点成功",
+        "results": results
+    }

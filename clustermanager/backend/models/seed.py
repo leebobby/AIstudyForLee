@@ -8,9 +8,93 @@ from sqlalchemy.orm import Session
 # 使用相对导入
 from .node import (
     Node, NetworkLink, BMCInfo, Alert, PatrolRecord,
-    PXEConfig, Log, FaultPoint, DPDKStats, RDMAStats,
+    PXEConfig, Log, FaultPoint, DPDKStats, RDMAStats, DiagScript,
     engine, SessionLocal
 )
+
+
+def _seed_diag_scripts(db: Session):
+    """生成示例诊断脚本"""
+    if db.query(DiagScript).count() > 0:
+        return
+
+    scripts = [
+        # 网络诊断
+        DiagScript(name="查看网络接口状态", category="网络诊断",
+                   description="显示所有网络接口的链路状态",
+                   script_content="ip link show", target_node_type="all", timeout=10),
+        DiagScript(name="查看IP地址", category="网络诊断",
+                   description="显示所有接口的IP地址配置",
+                   script_content="ip addr show", target_node_type="all", timeout=10),
+        DiagScript(name="查看路由表", category="网络诊断",
+                   description="显示当前路由表",
+                   script_content="ip route show", target_node_type="all", timeout=10),
+        DiagScript(name="网络连接统计", category="网络诊断",
+                   description="显示TCP/UDP连接状态统计",
+                   script_content="ss -s", target_node_type="all", timeout=10),
+        DiagScript(name="检查RDMA设备", category="网络诊断",
+                   description="查看RDMA网卡状态 (Slave节点)",
+                   script_content="ibstat 2>/dev/null || rdma link show 2>/dev/null || echo 'RDMA工具未找到'",
+                   target_node_type="slave", timeout=15),
+        DiagScript(name="检查DPDK绑定", category="网络诊断",
+                   description="查看DPDK网卡绑定状态 (Master节点)",
+                   script_content="dpdk-devbind.py --status 2>/dev/null || python3 /usr/share/dpdk/usertools/dpdk-devbind.py --status 2>/dev/null || echo 'DPDK工具未找到'",
+                   target_node_type="master", timeout=15),
+
+        # 系统诊断
+        DiagScript(name="系统负载概览", category="系统诊断",
+                   description="显示CPU/内存/磁盘使用情况",
+                   script_content="echo '=== 系统运行时间 ===' && uptime && echo && echo '=== 内存使用 ===' && free -h && echo && echo '=== 磁盘使用 ===' && df -h",
+                   target_node_type="all", timeout=10),
+        DiagScript(name="CPU占用Top进程", category="系统诊断",
+                   description="显示CPU占用最高的20个进程",
+                   script_content="ps aux --sort=-%cpu | head -21",
+                   target_node_type="all", timeout=10),
+        DiagScript(name="内核错误日志", category="系统诊断",
+                   description="从dmesg筛选错误和警告信息",
+                   script_content="dmesg | grep -iE 'error|warn|fail|oops|panic' | tail -100",
+                   target_node_type="all", timeout=15),
+        DiagScript(name="系统服务状态", category="系统诊断",
+                   description="列出所有失败的systemd服务",
+                   script_content="systemctl --failed --no-legend",
+                   target_node_type="all", timeout=10),
+        DiagScript(name="最近系统日志", category="系统诊断",
+                   description="查看最近200条系统日志",
+                   script_content="journalctl -n 200 --no-pager 2>/dev/null || tail -200 /var/log/messages",
+                   target_node_type="all", timeout=15),
+
+        # 存储诊断
+        DiagScript(name="磁盘使用情况", category="存储诊断",
+                   description="显示各分区磁盘使用率",
+                   script_content="df -h", target_node_type="all", timeout=10),
+        DiagScript(name="磁盘IO统计", category="存储诊断",
+                   description="采集3秒磁盘IO数据",
+                   script_content="iostat -xz 1 3 2>/dev/null || echo 'iostat未安装 (yum install sysstat)'",
+                   target_node_type="all", timeout=20),
+        DiagScript(name="块设备列表", category="存储诊断",
+                   description="列出所有块设备及其挂载点",
+                   script_content="lsblk -o NAME,SIZE,TYPE,MOUNTPOINT",
+                   target_node_type="all", timeout=10),
+
+        # 硬件诊断
+        DiagScript(name="PCI设备列表", category="硬件诊断",
+                   description="列出所有PCI设备（含网卡）",
+                   script_content="lspci | grep -iE 'ethernet|infiniband|mellanox|intel'",
+                   target_node_type="all", timeout=10),
+        DiagScript(name="CPU信息", category="硬件诊断",
+                   description="显示CPU型号和核心数",
+                   script_content="lscpu | grep -E 'Model name|CPU\\(s\\)|Thread|Core|Socket'",
+                   target_node_type="all", timeout=10),
+        DiagScript(name="内存详情", category="硬件诊断",
+                   description="显示内存条详细信息",
+                   script_content="dmidecode -t memory 2>/dev/null | grep -E 'Size|Type|Speed|Locator' | grep -v 'No Module'",
+                   target_node_type="all", timeout=10),
+    ]
+
+    for s in scripts:
+        db.add(s)
+    db.commit()
+    print(f"  - 已生成 {len(scripts)} 个示例诊断脚本")
 
 
 def seed_demo_data():
@@ -20,7 +104,8 @@ def seed_demo_data():
     try:
         # 检查是否已有数据
         if db.query(Node).count() > 0:
-            print("数据库已有数据，跳过种子数据生成")
+            print("数据库已有数据，跳过节点数据生成")
+            _seed_diag_scripts(db)
             return
 
         # 创建Master节点
@@ -231,6 +316,8 @@ def seed_demo_data():
             db.add(rdma_stat)
 
         db.commit()
+
+        _seed_diag_scripts(db)
 
         print("演示数据已生成:")
         print(f"  - 1 Master节点 (master-1)")

@@ -4,7 +4,7 @@
 
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, JSON, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -185,6 +185,22 @@ class PXEConfig(Base):
     data_gateway = Column(String(45))
     dns_servers = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class DiagScript(Base):
+    """诊断脚本配置表 - 支持分类管理和SSH远程执行"""
+    __tablename__ = 'diag_scripts'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100))
+    description = Column(Text, default='')
+    category = Column(String(50), default='通用诊断')
+    script_content = Column(Text)           # SSH命令或脚本内容
+    target_node_type = Column(String(20), default='all')  # all/master/slave/sensor
+    timeout = Column(Integer, default=30)   # 超时秒数
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 # 数据库连接
