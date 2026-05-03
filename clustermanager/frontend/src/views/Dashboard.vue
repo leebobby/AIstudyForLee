@@ -125,7 +125,7 @@
           <div class="patrol-stats">
             <el-progress
               :percentage="patrolStats.pass_rate || 0"
-              :color="#67c23a"
+              color="#67c23a"
               :format="(percentage) => `合格率 ${percentage}%`"
             />
             <div class="patrol-detail">

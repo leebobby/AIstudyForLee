@@ -1,0 +1,21 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Backend
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/**/*.pyc
+backend/cluster_manager.db
+
+# Python
+*.pyc
+__pycache__/
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db

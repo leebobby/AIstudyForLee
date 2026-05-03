@@ -9,3 +9,6 @@ workspace/*/build/
 
 # 不把 API Key 提交进去
 *.local.py
+
+#前端的node_modules
+node_modules/
