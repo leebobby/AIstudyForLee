@@ -2,11 +2,15 @@
 Cluster Manager - FastAPI 主入口
 """
 
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 
+from config import STATIC_DIR
 from models.node import init_db, engine
 from models.seed import seed_demo_data
 from api import nodes, pxe, ipmi, network, alerts, diagnose, patrol
@@ -40,7 +44,7 @@ def _run_migrations():
 
     # 确保 nodes.json 存储目录存在，并预生成默认配置
     from services.pxe_service import pxe_service_v2
-    pxe_service_v2.read_nodes_json()  # 首次调用会写入默认模板
+    pxe_service_v2.read_nodes_json()
 
 
 @asynccontextmanager
@@ -54,11 +58,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Cluster Manager",
     description="集群配置、管理、诊断系统 - 支持三平面网络架构",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan
 )
 
-# CORS配置
+# CORS（开发模式前后端分离时需要；打包后同源访问仍保留）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -67,21 +71,47 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册路由
-app.include_router(nodes.router, prefix="/api/nodes", tags=["节点管理"])
-app.include_router(pxe.router, prefix="/api/pxe", tags=["PXE部署"])
-app.include_router(ipmi.router, prefix="/api/ipmi", tags=["IPMI/BMC"])
+# ── API 路由（必须在静态文件挂载之前注册）────────────────────────────────────
+app.include_router(nodes.router,   prefix="/api/nodes",   tags=["节点管理"])
+app.include_router(pxe.router,     prefix="/api/pxe",     tags=["PXE部署"])
+app.include_router(ipmi.router,    prefix="/api/ipmi",    tags=["IPMI/BMC"])
 app.include_router(network.router, prefix="/api/network", tags=["网络配置"])
-app.include_router(alerts.router, prefix="/api/alerts", tags=["告警管理"])
-app.include_router(diagnose.router, prefix="/api/diagnose", tags=["故障诊断"])
-app.include_router(patrol.router, prefix="/api/patrol", tags=["巡检管理"])
-
-
-@app.get("/")
-async def root():
-    return {"message": "Cluster Manager API", "version": "1.0.0"}
+app.include_router(alerts.router,  prefix="/api/alerts",  tags=["告警管理"])
+app.include_router(diagnose.router,prefix="/api/diagnose",tags=["故障诊断"])
+app.include_router(patrol.router,  prefix="/api/patrol",  tags=["巡检管理"])
 
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "version": "2.0.0"}
+
+
+# ── 前端静态文件（打包后 static/ 目录存在则启用）────────────────────────────
+# Vue Router 使用 history 模式，所有非 /api 路径均返回 index.html
+if os.path.isdir(STATIC_DIR):
+    # 先挂载 /assets 目录（Vite 生成的 JS/CSS hash 文件）
+    _assets = os.path.join(STATIC_DIR, "assets")
+    if os.path.isdir(_assets):
+        app.mount("/assets", StaticFiles(directory=_assets), name="assets")
+
+    # favicon 等根目录静态资源
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon():
+        f = os.path.join(STATIC_DIR, "favicon.ico")
+        return FileResponse(f) if os.path.exists(f) else FileResponse(
+            os.path.join(STATIC_DIR, "index.html")
+        )
+
+    # SPA 入口：所有其他路径返回 index.html（Vue Router 客户端路由）
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        index = os.path.join(STATIC_DIR, "index.html")
+        return FileResponse(index)
+
+
+# ── 可执行入口（PyInstaller / python main.py 直接运行）────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    host = os.environ.get("CLUSTER_MANAGER_HOST", "0.0.0.0")
+    port = int(os.environ.get("CLUSTER_MANAGER_PORT", "8000"))
+    uvicorn.run(app, host=host, port=port, log_level="info")

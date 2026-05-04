@@ -204,8 +204,9 @@ class DiagScript(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
-# 数据库连接
-DATABASE_URL = "sqlite:///./cluster_manager.db"
+# 数据库连接（路径兼容 PyInstaller 打包后运行）
+from config import DATABASE_PATH
+DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -7,7 +7,8 @@ import json
 from typing import Dict, List, Optional
 from pathlib import Path
 
-DEFAULT_NODES_JSON_PATH = Path(__file__).parent.parent / "pxe_data" / "nodes.json"
+from config import PXE_DATA_DIR as _PXE_DATA_DIR
+DEFAULT_NODES_JSON_PATH = Path(_PXE_DATA_DIR) / "nodes.json"
 
 
 class PXEServiceV2:

@@ -111,9 +111,79 @@ clustermanager/
 | `GET  /api/pxe/setup-raid1-script` | 生成 RAID1 初始化脚本 |
 | `GET  /api/pxe/pxe-boot-script` | 生成 PXE 启动脚本 |
 
+## 生产部署（OpenEuler ARM → Windows 浏览器访问）
+
+### 架构
+
+```
+OpenEuler aarch64 服务器
+  └── /opt/cluster-manager/
+        ├── cluster-manager   ← PyInstaller 单目录可执行
+        ├── static/           ← Vue 构建产物（由 FastAPI 直接提供）
+        ├── pxe_data/         ← nodes.json（首次运行自动生成）
+        └── cluster_manager.db← SQLite 数据库（首次运行自动创建）
+
+Windows 桌面
+  └── 浏览器访问 http://<arm-ip>:8000
+```
+
+### 一键构建（在 ARM 机器上执行）
+
+```bash
+# 1. 克隆代码到 ARM 机器
+git clone <repo> clustermanager && cd clustermanager
+
+# 2. 构建（自动完成：前端 npm build → PyInstaller 打包）
+chmod +x build.sh
+./build.sh
+
+# 3. 部署产物
+cp -r backend/dist/cluster-manager /opt/cluster-manager
+
+# 4a. 直接运行
+/opt/cluster-manager/start.sh
+
+# 4b. 或注册 systemd 服务（开机自启）
+cp cluster-manager.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now cluster-manager
+```
+
+### 也可以在 x86 机器上交叉构建再传到 ARM（推荐 ARM 本地构建）
+
+### 端口说明
+
+| 场景 | 地址 |
+|------|------|
+| Windows 访问前端 | `http://<arm-ip>:8000` |
+| API Swagger 文档 | `http://<arm-ip>:8000/docs` |
+| 修改端口 | 设置环境变量 `CLUSTER_MANAGER_PORT=8080` |
+
 ---
 
 ## 变更记录
+
+### 2026-05-05 — 生产部署打包支持（PyInstaller + 前端内嵌）
+
+**背景**：将系统部署到 OpenEuler ARM 服务器，Windows 桌面通过浏览器访问。
+
+**涉及文件**：
+- `backend/config.py` — **新建**：统一路径解析，兼容开发模式和 PyInstaller 打包运行
+- `backend/models/node.py` — DATABASE_URL 改用 `config.DATABASE_PATH`，路径跟随可执行文件
+- `backend/services/pxe_service.py` — nodes.json 路径改用 `config.PXE_DATA_DIR`
+- `backend/main.py` — 新增 Vue 静态文件挂载（SPA 路由 catch-all）+ `__main__` 入口
+- `frontend/vite.config.js` — `build.outDir` 设为 `../backend/static`
+- `backend/cluster_manager.spec` — **新建**：PyInstaller onedir 打包配置
+- `build.sh` — **新建**：一键构建脚本（前端 build + PyInstaller）
+- `cluster-manager.service` — **新建**：systemd 自启服务模板
+
+**部署流程**：
+1. `./build.sh` → 输出 `backend/dist/cluster-manager/`
+2. 复制到 ARM 服务器 `/opt/cluster-manager/`
+3. `./start.sh` 或 `systemctl enable --now cluster-manager`
+4. Windows 浏览器访问 `http://<arm-ip>:8000`
+
+---
 
 ### 2026-05-05 — PXE 模块 v2（对应部署方案 v2）
 

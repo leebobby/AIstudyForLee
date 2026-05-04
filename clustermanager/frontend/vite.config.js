@@ -9,6 +9,7 @@ export default defineConfig({
       '@': resolve(__dirname, 'src')
     }
   },
+  // 开发服务器：代理 /api 到后端
   server: {
     port: 3000,
     proxy: {
@@ -17,5 +18,11 @@ export default defineConfig({
         changeOrigin: true
       }
     }
+  },
+  // 生产构建：输出到后端 static/ 目录，由 FastAPI 直接提供服务
+  build: {
+    outDir: '../backend/static',
+    emptyOutDir: true,
+    assetsDir: 'assets'
   }
 })
