@@ -330,14 +330,14 @@ def seed_demo_data():
 
         # 创建PXE配置
         pxe_config = PXEConfig(
-            name="default-config",
-            mgmt_subnet="192.168.1.0/24",
-            ctrl_subnet="10.0.0.0/24",
-            data_subnet="192.168.100.0/24",
-            mgmt_gateway="192.168.1.1",
-            ctrl_gateway="10.0.0.1",
-            data_gateway="192.168.100.1",
-            dns_servers="8.8.8.8,8.8.4.4",
+            name="v2-kunpeng-22nodes",
+            mgmt_subnet="172.16.0.0/24",
+            ctrl_subnet="172.16.3.0/24",
+            data_subnet="100.1.0.0/16",
+            mgmt_gateway=None,
+            ctrl_gateway="172.16.3.1",
+            data_gateway=None,
+            dns_servers="172.16.3.10",
             created_at=datetime.utcnow()
         )
         db.add(pxe_config)

@@ -3,7 +3,12 @@
     "allow": [
       "Bash(python -c ' *)",
       "Bash(Get-ChildItem -Recurse \"d:\\\\01.code\\\\00.AIstudy\\\\AIstudyForLee\\\\clustermanager\\\\\" -ErrorAction SilentlyContinue | Select-Object -First 50 | Format-Table FullName)",
-      "Bash(python -c \"from models.node import DiagScript, Base; print\\('DiagScript model OK'\\); from services.diag_service import run_ssh_command, collect_node_logs; print\\('diag_service OK'\\)\")"
+      "Bash(python -c \"from models.node import DiagScript, Base; print\\('DiagScript model OK'\\); from services.diag_service import run_ssh_command, collect_node_logs; print\\('diag_service OK'\\)\")",
+      "Bash(Get-ChildItem -Path \"d:\\\\01.code\\\\00.AIstudy\\\\AIstudyForLee\" -Recurse -Directory -Filter \"clustermanager\")",
+      "Bash(Select-Object -First 1)",
+      "Bash(python -c \"from services.pxe_service import pxe_service_v2\")",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0,'.'\\);  from services.pxe_service import pxe_service_v2; print\\('OK'\\)\")"
     ]
   }
 }
