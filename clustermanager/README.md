@@ -113,55 +113,203 @@ clustermanager/
 
 ## 生产部署（OpenEuler ARM → Windows 浏览器访问）
 
-### 架构
+> **PyInstaller 不支持跨平台编译**（无法在 Windows x86 上直接生成 Linux ARM 二进制）。  
+> 提供两条路径，按场景选择：
+
+### 方案对比
+
+| | 部署包方案 | Docker 方案 |
+|--|-----------|------------|
+| 前提 | Node.js（Windows）+ Python（ARM） | Docker Desktop（Windows）+ Docker（ARM） |
+| 构建位置 | 前端在 Windows，Python 在 ARM | 全部在 Windows（QEMU 模拟） |
+| 产物 | ZIP 包 + Python 源码 | 容器镜像 |
+| 隔离性 | venv 虚拟环境 | 容器级隔离 |
+| 推荐场景 | 快速部署，无 Docker 环境 | 标准化分发，多服务器部署 |
+
+---
+
+### 方案一：部署包（推荐，无需 Docker）
 
 ```
-OpenEuler aarch64 服务器
-  └── /opt/cluster-manager/
-        ├── cluster-manager   ← PyInstaller 单目录可执行
-        ├── static/           ← Vue 构建产物（由 FastAPI 直接提供）
-        ├── pxe_data/         ← nodes.json（首次运行自动生成）
-        └── cluster_manager.db← SQLite 数据库（首次运行自动创建）
-
-Windows 桌面
-  └── 浏览器访问 http://<arm-ip>:8000
+Windows                              ARM 服务器
+─────────────────────────────────    ──────────────────────────────────────
+1. build.bat                         3. 解压 + deploy.sh
+   npm run build  ──────────┐           unzip cluster-manager-deploy.zip
+   打包成 ZIP     ──────────┤           ./deploy.sh
+                            │           → pip install requirements.txt
+                  scp ──────┘           → systemd 服务注册
+2. cluster-manager-deploy.zip        4. 浏览器访问 http://<arm-ip>:8000
 ```
 
-### 一键构建（在 ARM 机器上执行）
+**Windows 端（构建）**：
+```bat
+build.bat
+:: 产物: cluster-manager-deploy.zip
+```
+
+**传输到 ARM**：
+```bash
+scp cluster-manager-deploy.zip root@<arm-ip>:/opt/
+```
+
+**ARM 端（部署）**：
+```bash
+cd /opt
+unzip cluster-manager-deploy.zip -d cluster-manager
+cd cluster-manager
+chmod +x deploy.sh
+./deploy.sh
+# → 自动 pip install + 注册 systemd 开机自启
+```
+
+---
+
+### 方案二：Docker 多平台构建
+
+**前提**：Windows 安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，并启用 QEMU 多平台支持。
+
+**Windows 端（构建 ARM64 镜像）**：
+```powershell
+# 首次使用需创建 buildx builder
+docker buildx create --use --name arm-builder
+
+# 构建 ARM64 镜像并推送（替换 your-registry）
+docker buildx build --platform linux/arm64 `
+    -t your-registry/cluster-manager:latest `
+    --push .
+
+# 或直接保存为 tar 传输
+docker buildx build --platform linux/arm64 `
+    -t cluster-manager:latest `
+    -o type=docker,dest=cluster-manager-arm64.tar .
+```
+
+**ARM 端（运行）**：
+```bash
+# 方式 A：从镜像仓库拉取
+docker compose up -d
+
+# 方式 B：从 tar 导入
+docker load < cluster-manager-arm64.tar
+docker compose up -d
+```
+
+**数据持久化**（docker-compose.yml 已配置 volume `cluster_data`）：
+```
+/var/lib/docker/volumes/cluster_data/_data/
+├── cluster_manager.db   ← SQLite 数据库
+├── pxe_data/            ← nodes.json 等
+└── static/              ← 已内嵌镜像，无需挂载
+```
+
+---
+
+### 方案三：全部在 ARM 构建机上构建（推荐用于生产交付）
 
 ```bash
-# 1. 克隆代码到 ARM 机器
-git clone <repo> clustermanager && cd clustermanager
+# 构建机（有 Node.js + Python + pip）
+chmod +x build.sh && ./build.sh
+# 产物: cluster-manager-linux-arm64.tar.gz（自包含，生产机无需安装任何依赖）
 
-# 2. 构建（自动完成：前端 npm build → PyInstaller 打包）
-chmod +x build.sh
-./build.sh
+# 生产机（干净的 OpenEuler ARM，什么都不需要装）
+scp cluster-manager-linux-arm64.tar.gz root@<prod-ip>:/opt/
+ssh root@<prod-ip> 'cd /opt && tar -xzf cluster-manager-linux-arm64.tar.gz'
 
-# 3. 部署产物
-cp -r backend/dist/cluster-manager /opt/cluster-manager
+# 直接运行
+ssh root@<prod-ip> '/opt/cluster-manager/start.sh'
 
-# 4a. 直接运行
-/opt/cluster-manager/start.sh
-
-# 4b. 或注册 systemd 服务（开机自启）
-cp cluster-manager.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now cluster-manager
+# 或注册为开机自启服务
+ssh root@<prod-ip> 'cd /opt/cluster-manager && sudo ./install-service.sh'
 ```
 
-### 也可以在 x86 机器上交叉构建再传到 ARM（推荐 ARM 本地构建）
+**产物目录结构**：
+```
+cluster-manager-linux-arm64.tar.gz
+└── cluster-manager/
+    ├── cluster-manager       ← 可执行文件（含 Python 运行时 + 全部依赖）
+    ├── _internal/            ← PyInstaller 依赖库（自动加载，无需关心）
+    ├── static/               ← Vue 前端（FastAPI 直接提供服务）
+    ├── start.sh              ← 启动脚本
+    └── install-service.sh    ← systemd 自启注册脚本
+```
 
-### 端口说明
+---
 
-| 场景 | 地址 |
-|------|------|
-| Windows 访问前端 | `http://<arm-ip>:8000` |
-| API Swagger 文档 | `http://<arm-ip>:8000/docs` |
-| 修改端口 | 设置环境变量 `CLUSTER_MANAGER_PORT=8080` |
+### 端口与环境变量
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `CLUSTER_MANAGER_HOST` | `0.0.0.0` | 监听地址 |
+| `CLUSTER_MANAGER_PORT` | `8000` | 监听端口 |
+| `CLUSTER_MANAGER_DATA` | 程序目录 | 数据目录（DB + pxe_data），Docker 必须设置 |
+
+| 访问地址 | 说明 |
+|----------|------|
+| `http://<arm-ip>:8000` | 前端界面 |
+| `http://<arm-ip>:8000/docs` | API Swagger 文档 |
 
 ---
 
 ## 变更记录
+
+### 2026-05-05 — 节点管理页支持手动新增/编辑/删除节点
+
+**背景**：已完成 PXE 部署的集群可直接通过 UI 手动录入节点信息，无需再走 PXE 流程，实现组网图和后续监控功能。
+
+**涉及文件**：
+- `backend/api/nodes.py` — `NodeCreate` 补充 `os_version / cpu_cores / memory_gb / disk_gb`；`NodeUpdate` 补全所有 MAC 字段和 `data_protocol`（原缺失）
+- `frontend/src/views/Nodes.vue` — 重写，新增以下能力：
+
+**前端变更详情**：
+
+| 变更点 | 说明 |
+|--------|------|
+| 新增节点按钮 | 表头右侧新增"新增节点"按钮，打开空白表单 |
+| 编辑/删除按钮 | 操作列新增"编辑"（主色）和"删除"（红色）按钮，删除带二次确认弹窗 |
+| 新增/编辑对话框 | 700px 宽，按五个区块组织：基本信息 / 管理面 / 控制面 / 数据面 / 硬件信息 |
+| 节点类型扩展 | 筛选下拉和表单选项新增 SubSwath、GStorage、Sensor |
+| 角色副标题 | 类型列在 Tag 下方显示 `role` 字段内容 |
+| 类型色彩区分 | Master=红、Slave=蓝、SubSwath=橙、GStorage=绿 |
+| 空值处理 | 保存时空字符串自动转 `null`，避免覆盖已有数据 |
+
+---
+
+### 2026-05-05 — build.sh 改为生产自包含包（无需在生产机安装依赖）
+
+**背景**：生产机应该零依赖，直接解压运行，不允许执行 pip install。
+
+**涉及文件**：
+- `build.sh` — 重写：PyInstaller 打包 + 手动复制 `static/` + 输出 `tar.gz`
+- `backend/cluster_manager.spec` — 移除 `datas` 中的 `static/`（改为 build.sh 手动复制，避免 `sys._MEIPASS` 路径混淆）
+
+**生产机部署步骤**（三行命令）：
+```bash
+tar -xzf cluster-manager-linux-arm64.tar.gz
+./cluster-manager/start.sh          # 直接运行
+# 或
+./cluster-manager/install-service.sh # 注册开机自启
+```
+
+---
+
+### 2026-05-05 — 跨平台部署支持（Windows 构建 → Linux ARM 部署）
+
+**背景**：PyInstaller 不支持交叉编译，需提供可在 Windows 上构建、Linux ARM 上部署的方案。
+
+**涉及文件**：
+- `backend/config.py` — 新增 `CLUSTER_MANAGER_DATA` 环境变量支持（Docker 数据目录）
+- `build.bat` — **新建**：Windows 一键构建脚本（前端 build + 打包 ZIP）
+- `deploy.sh` — **新建**：Linux ARM 部署脚本（pip install + systemd 注册）
+- `Dockerfile` — **新建**：多阶段构建，支持 `linux/arm64` 和 `linux/amd64`
+- `docker-compose.yml` — **新建**：Docker 部署配置，volume 持久化数据
+- `.dockerignore` — **新建**：排除 node_modules 等大文件
+
+**三种部署路径**：
+1. **Windows build.bat → ZIP → ARM deploy.sh**（推荐，无需 Docker）
+2. **Windows docker buildx → ARM docker compose**（标准化，需 Docker）
+3. **ARM 本地 build.sh**（最简单，全部在 ARM 上完成）
+
+---
 
 ### 2026-05-05 — 生产部署打包支持（PyInstaller + 前端内嵌）
 

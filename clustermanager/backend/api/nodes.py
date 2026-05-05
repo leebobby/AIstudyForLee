@@ -16,7 +16,7 @@ router = APIRouter()
 
 class NodeCreate(BaseModel):
     hostname: str
-    node_type: str  # master/slave/sensor
+    node_type: str  # master/slave/subswath/gstorage/sensor
     role: Optional[str] = None
     mgmt_ip: Optional[str] = None
     mgmt_mac: Optional[str] = None
@@ -27,6 +27,10 @@ class NodeCreate(BaseModel):
     data_ip: Optional[str] = None
     data_mac: Optional[str] = None
     data_protocol: Optional[str] = None
+    os_version: Optional[str] = None
+    cpu_cores: Optional[int] = None
+    memory_gb: Optional[int] = None
+    disk_gb: Optional[int] = None
 
 
 class NodeUpdate(BaseModel):
@@ -34,8 +38,14 @@ class NodeUpdate(BaseModel):
     node_type: Optional[str] = None
     role: Optional[str] = None
     mgmt_ip: Optional[str] = None
+    mgmt_mac: Optional[str] = None
+    bmc_ip: Optional[str] = None
+    bmc_mac: Optional[str] = None
     ctrl_ip: Optional[str] = None
+    ctrl_mac: Optional[str] = None
     data_ip: Optional[str] = None
+    data_mac: Optional[str] = None
+    data_protocol: Optional[str] = None
     ctrl_status: Optional[str] = None
     data_status: Optional[str] = None
     status: Optional[str] = None

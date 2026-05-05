@@ -10,10 +10,9 @@ a = Analysis(
     ['main.py'],
     pathex=['.'],
     binaries=[],
-    datas=[
-        # Vue 构建产物（npm run build 后生成）
-        ('static', 'static'),
-    ],
+    datas=[],
+    # static/ 不放进 PyInstaller bundle，由 build.sh 在打包后手动复制到 dist 目录
+    # 这样 config.py 里 BASE_DIR = dirname(sys.executable) 可以直接找到 static/
     hiddenimports=[
         # uvicorn 协议/循环实现
         'uvicorn.logging',
