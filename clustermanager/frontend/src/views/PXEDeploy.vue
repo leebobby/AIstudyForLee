@@ -1293,6 +1293,17 @@ onMounted(async () => {
   margin-bottom: 6px;
 }
 
+/* ── 对话框内 el-divider 暗色 ── */
+.pxe-deploy :deep(.el-dialog .el-divider) {
+  border-top-color: #1e293b;
+}
+.pxe-deploy :deep(.el-dialog .el-divider__text) {
+  background-color: #1a2744;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 /* ── 脚本输出 ── */
 .script-output {
   white-space: pre-wrap;

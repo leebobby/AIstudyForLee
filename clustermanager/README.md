@@ -252,6 +252,27 @@ cluster-manager-linux-arm64.tar.gz
 
 ## 变更记录
 
+### 2026-05-08 — 配色修复 + 组网图 100G 交换机拓扑 + 多接口并行链路
+
+**涉及文件**：
+- `frontend/src/views/Nodes.vue`
+- `frontend/src/views/PXEDeploy.vue`
+- `frontend/src/views/NetworkMap.vue`
+- `backend/api/network.py`
+
+**变更详情**：
+
+| # | 变更点 | 说明 |
+|---|--------|------|
+| 1 | **Nodes.vue 暗色表格** | 新增 `.nodes-view :deep(.el-table)` 覆盖，表头 `#0d1b2e`、hover `#1e3a5f`，与 PXE 页面配色统一 |
+| 2 | **对话框 divider 修复** | Nodes.vue + PXEDeploy.vue 编辑对话框中 `el-divider` 标签背景改为 `#1a2744`，消除白色背景块 |
+| 3 | **组网图 100G 数据交换机** | 新增 `sw-data-100g` 虚拟节点；DPDK（传感器/Master）和 RDMA（Master/Slave/SubSwath/GStorage）均通过交换机中转，不再直连 |
+| 4 | **多接口并行链路** | 读取 nodes.json NIC 清单，每个物理接口生成独立链路（携带 `port_index`/`port_count`/`nic` 字段）；前端按垂直偏移（11px 间距）渲染平行曲线，标注显示网卡名（如 `enp129s0f0`） |
+| 5 | **5 层拓扑布局** | 新增"数据交换层"（100GE 交换机），布局调整为：管理层 → 控制层 → 主控层 → 数据交换层 → 数据处理层 |
+| 6 | **SubSwath / GStorage 节点** | 加入数据处理层，图标 N/G，颜色绿/橙褐，`NODE_TYPE_LABEL` / `NODE_R` / `nodeFills` 同步补全 |
+
+---
+
 ### 2026-05-08 — PXE 表格暗色主题修复 + IP规划同步节点配置/组网图
 
 **涉及文件**：

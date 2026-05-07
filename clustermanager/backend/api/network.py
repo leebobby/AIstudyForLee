@@ -9,6 +9,7 @@ from datetime import datetime
 
 from models.node import Node, NetworkLink, get_db
 from pydantic import BaseModel
+from services.pxe_service import pxe_service_v2
 
 
 router = APIRouter()
@@ -138,9 +139,30 @@ def get_topology_graph(db: Session = Depends(get_db)):
     """获取组网图数据（用于前端D3.js渲染）"""
     nodes = db.query(Node).all()
 
-    masters = [n for n in nodes if n.node_type == 'master']
-    slaves  = [n for n in nodes if n.node_type == 'slave']
-    sensors = [n for n in nodes if n.node_type == 'sensor']
+    masters  = [n for n in nodes if n.node_type == 'master']
+    slaves   = [n for n in nodes if n.node_type == 'slave']
+    sensors  = [n for n in nodes if n.node_type == 'sensor']
+    storages = [n for n in nodes if n.node_type in ('subswath', 'gstorage')]
+
+    # ── 从 nodes.json 读取每节点的 NIC 清单 ──────────────────
+    nic_map: dict = {}
+    try:
+        nj = pxe_service_v2.read_nodes_json()
+        for mac, nd in nj.items():
+            if mac.startswith("_"):
+                continue
+            hn = nd.get("hostname_new", "")
+            def _split(s): return s.split() if s else []
+            nic_map[hn] = {
+                "dpdk_nics": _split(nd.get("dpdk_nics", "")),
+                "dpdk_ips":  _split(nd.get("dpdk_ips",  "")),
+                "rdma_nics": _split(nd.get("rdma_nics", "")),
+                "rdma_ips":  _split(nd.get("rdma_ips",  "")),
+            }
+    except Exception:
+        pass
+
+    has_data = bool(masters or slaves or sensors or storages)
 
     # ── 基础设施虚拟节点 ──────────────────────────────────────
     graph_nodes = [
@@ -149,7 +171,7 @@ def get_topology_graph(db: Session = Depends(get_db)):
             "name": "管理站",
             "type": "mgmt_station",
             "status": "online",
-            "planes": {"management": {"ip": "192.168.1.1", "status": "online"}}
+            "planes": {"management": {"ip": "172.16.0.1", "status": "online"}}
         },
         {
             "id": "sw-mgmt",
@@ -164,6 +186,13 @@ def get_topology_graph(db: Session = Depends(get_db)):
             "type": "switch",
             "switch_plane": "control",
             "status": "online" if any(n.ctrl_status == 'online' for n in nodes) else "offline"
+        },
+        {
+            "id": "sw-data-100g",
+            "name": "数据交换机 100GE",
+            "type": "switch",
+            "switch_plane": "data_front",
+            "status": "online" if has_data else "offline"
         },
     ]
 
@@ -210,7 +239,7 @@ def get_topology_graph(db: Session = Depends(get_db)):
                 "latency": 1.0, "packet_loss": 0
             })
 
-    # ── 控制面：控制交换机 → 所有有控制面 IP 的节点 ──────────
+    # ── 控制面：控制交换机 → 所有节点 ────────────────────────
     for node in nodes:
         if node.ctrl_ip:
             graph_links.append({
@@ -221,27 +250,35 @@ def get_topology_graph(db: Session = Depends(get_db)):
                 "latency": 0.5, "packet_loss": 0
             })
 
-    # ── 数据面前段：传感器 → Master（DPDK，直连） ────────────
-    for sensor in sensors:
-        for master in masters:
+    def _data_links(node, plane, proto, is_online):
+        """生成节点 ↔ 100G 数据交换机的逐接口链路"""
+        nics_key = "dpdk_nics" if plane == "data_front" else "rdma_nics"
+        ips_key  = "dpdk_ips"  if plane == "data_front" else "rdma_ips"
+        info = nic_map.get(node.hostname, {})
+        nics = info.get(nics_key, []) or (["eno2"] if plane == "data_back" else [])
+        ips  = info.get(ips_key, [])
+        port_count = max(len(nics), 1)
+        for idx, nic in enumerate(nics):
+            ip = ips[idx].split("/")[0] if idx < len(ips) else ""
             graph_links.append({
-                "source": str(sensor.id), "target": str(master.id),
-                "plane": "data_front", "protocol": "DPDK",
+                "source": str(node.id), "target": "sw-data-100g",
+                "plane": plane, "protocol": proto,
                 "bandwidth": "100GE",
-                "status": "normal" if sensor.data_status == "online" and master.data_status == "online" else "down",
+                "nic": nic, "ip": ip,
+                "port_index": idx, "port_count": port_count,
+                "status": "normal" if is_online else "down",
                 "latency": 0.1, "packet_loss": 0
             })
 
-    # ── 数据面后段：Master → Slave（RDMA，直连） ─────────────
-    for master in masters:
-        for slave in slaves:
-            graph_links.append({
-                "source": str(master.id), "target": str(slave.id),
-                "plane": "data_back", "protocol": "RDMA",
-                "bandwidth": "100GE",
-                "status": "normal" if master.data_status == "online" and slave.data_status == "online" else "down",
-                "latency": 0.1, "packet_loss": 0
-            })
+    # ── 数据面前段（DPDK）：传感器 + Master ↔ 数据交换机 ─────
+    for node in sensors + masters:
+        _data_links(node, "data_front", "DPDK",
+                    node.data_status == "online")
+
+    # ── 数据面后段（RDMA）：Master + Slave + 存储 ↔ 数据交换机
+    for node in masters + slaves + storages:
+        _data_links(node, "data_back", "RDMA",
+                    node.data_status == "online")
 
     return {
         "nodes": graph_nodes,

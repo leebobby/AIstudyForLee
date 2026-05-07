@@ -166,6 +166,8 @@ const PLANE_LABEL = {
 const NODE_TYPE_LABEL = {
   master:       'Master 节点',
   slave:        'Slave 节点',
+  subswath:     'SubSwath NFS Server',
+  gstorage:     'GStorage NFS Server',
   sensor:       '传感器阵列',
   mgmt_station: '管理站',
   switch:       '交换机',
@@ -192,11 +194,11 @@ const STAT_PLANES = [
 ]
 
 // 节点尺寸
-const NODE_R = { master: 32, slave: 22, sensor: 24, mgmt_station: 26, switch: 0 }
-const SW_W = 88, SW_H = 38
+const NODE_R = { master: 32, slave: 22, subswath: 22, gstorage: 22, sensor: 24, mgmt_station: 26, switch: 0 }
+const SW_W = 96, SW_H = 38
 
 // 节点内部图标文字
-const NODE_ICON = { master: 'M', slave: 'S', sensor: 'D', mgmt_station: '⚙' }
+const NODE_ICON = { master: 'M', slave: 'S', subswath: 'N', gstorage: 'G', sensor: 'D', mgmt_station: '⚙' }
 
 // ─── 响应式状态 ───────────────────────────────────────────────
 const topoRef    = ref(null)
@@ -225,49 +227,57 @@ const loadAll = async () => {
   }
 }
 
-// ─── 固定层级布局计算 ─────────────────────────────────────────
+// ─── 固定层级布局计算（5层）────────────────────────────────
 const computePositions = (nodes, W, H) => {
   const pos = {}
-  const padX = 72
-
+  const padX = 64
   const usableW = W - padX * 2
 
   // 按类型分组
   const masters  = nodes.filter(n => n.type === 'master')
   const slaves   = nodes.filter(n => n.type === 'slave')
+  const storages = nodes.filter(n => n.type === 'subswath' || n.type === 'gstorage')
   const sensors  = nodes.filter(n => n.type === 'sensor')
   const mgmtSt   = nodes.find(n => n.id === 'mgmt-station')
   const swMgmt   = nodes.find(n => n.id === 'sw-mgmt')
   const swCtrl   = nodes.find(n => n.id === 'sw-ctrl')
+  const swData   = nodes.find(n => n.id === 'sw-data-100g')
 
-  // 各行 Y 坐标
-  const y0 = H * 0.12   // 管理站 + 管理交换机
-  const y1 = H * 0.36   // 传感器 + 控制交换机
-  const y2 = H * 0.60   // Master
-  const y3 = H * 0.84   // Slaves
+  // 5 层 Y 坐标
+  const y0 = H * 0.09   // 管理层
+  const y1 = H * 0.26   // 控制层（含传感器）
+  const y2 = H * 0.47   // 主控层（Master）
+  const y3 = H * 0.64   // 数据交换层（100G 交换机）
+  const y4 = H * 0.84   // 数据处理层（Slave + SubSwath + GStorage）
 
-  // 第 0 行
+  // 第 0 层
   if (mgmtSt) pos['mgmt-station'] = { x: padX + usableW * 0.12, y: y0 }
   if (swMgmt) pos['sw-mgmt']      = { x: padX + usableW * 0.55, y: y0 }
 
-  // 第 1 行
+  // 第 1 层
   sensors.forEach((s, i) => {
-    pos[s.id] = { x: padX + usableW * (0.06 + i * 0.12), y: y1 }
+    pos[s.id] = { x: padX + usableW * (0.05 + i * 0.11), y: y1 }
   })
   if (swCtrl) pos['sw-ctrl'] = { x: padX + usableW * 0.55, y: y1 }
 
-  // 第 2 行：Master 居中
-  const masterStep = masters.length > 1 ? usableW * 0.22 : 0
+  // 第 2 层：Master 居中展开
+  const masterStep = masters.length > 1
+    ? Math.min(usableW * 0.85 / (masters.length - 1), usableW * 0.20)
+    : 0
   const masterStartX = padX + usableW * 0.5 - masterStep * (masters.length - 1) / 2
   masters.forEach((m, i) => {
     pos[m.id] = { x: masterStartX + i * masterStep, y: y2 }
   })
 
-  // 第 3 行：Slaves 均匀分布
-  slaves.forEach((s, i) => {
-    pos[s.id] = {
-      x: padX + (i + 0.5) * (usableW / Math.max(slaves.length, 1)),
-      y: y3,
+  // 第 3 层：100G 数据交换机（居中）
+  if (swData) pos['sw-data-100g'] = { x: padX + usableW * 0.5, y: y3 }
+
+  // 第 4 层：Slaves + Storages 均匀分布
+  const bottomNodes = [...slaves, ...storages]
+  bottomNodes.forEach((n, i) => {
+    pos[n.id] = {
+      x: padX + (i + 0.5) * (usableW / Math.max(bottomNodes.length, 1)),
+      y: y4,
     }
   })
 
@@ -357,8 +367,8 @@ const renderTopology = () => {
   )
 
   // ── 层级分隔虚线 ────────────────────────────────────────────
-  const ROWS   = [H * 0.12, H * 0.36, H * 0.60, H * 0.84]
-  const RLABEL = ['管理层', '网络层', '主控层', '数据处理层']
+  const ROWS   = [H * 0.09, H * 0.26, H * 0.47, H * 0.64, H * 0.84]
+  const RLABEL = ['管理层', '控制层', '主控层', '数据交换层', '数据处理层']
   const bgG = g.append('g').attr('pointer-events', 'none')
   ROWS.forEach((ry, ri) => {
     bgG.append('line')
@@ -385,36 +395,53 @@ const renderTopology = () => {
     const tgtNode = nodeById[tgtId]
     if (!srcPos || !tgtPos || !srcNode || !tgtNode) return
 
-    const s = edgePoint(srcPos, tgtPos, srcNode.type)
-    const t = edgePoint(tgtPos, srcPos, tgtNode.type)
+    // 多端口并行偏移（同节点→同交换机的多条链路横向错开）
+    const portCount = link.port_count || 1
+    const portIndex = link.port_index ?? 0
+    let eSrc = srcPos, eTgt = tgtPos
+    if (portCount > 1) {
+      const dx = tgtPos.x - srcPos.x
+      const dy = tgtPos.y - srcPos.y
+      const len = Math.hypot(dx, dy) || 1
+      const perpX = -dy / len
+      const perpY =  dx / len
+      const spacing = 11
+      const offset = (portIndex - (portCount - 1) / 2) * spacing
+      eSrc = { x: srcPos.x + perpX * offset, y: srcPos.y + perpY * offset }
+      eTgt = { x: tgtPos.x + perpX * offset, y: tgtPos.y + perpY * offset }
+    }
+
+    const s = edgePoint(eSrc, eTgt, srcNode.type)
+    const t = edgePoint(eTgt, eSrc, tgtNode.type)
 
     const isDown   = link.status === 'down'
     const isDeg    = link.status === 'degraded'
     const color    = isDown ? '#6b7280' : (PLANE_COLORS[link.plane] || '#94a3b8')
     const arrowKey = isDown ? 'down' : link.plane
-    const bwWidth  = link.bandwidth === '100GE' ? 3 : link.bandwidth === '10GE' ? 2 : 1.5
+    const bwWidth  = link.bandwidth === '100GE' ? 2.5 : link.bandwidth === '10GE' ? 2 : 1.5
 
     linkG.append('path')
       .attr('d', curvePath(s, t))
       .attr('stroke', color)
       .attr('stroke-width', bwWidth)
       .attr('stroke-dasharray', isDown ? '7,5' : isDeg ? '3,3' : null)
-      .attr('stroke-opacity', isDown ? 0.4 : 0.8)
+      .attr('stroke-opacity', isDown ? 0.4 : 0.75)
       .attr('fill', 'none')
       .attr('marker-end', `url(#arr-${arrowKey})`)
       .style('cursor', 'pointer')
       .on('click', () => { selected.value = { type: 'link', data: link } })
 
-    // 带宽标注
+    // 链路标注：多端口显示网卡名，单端口显示带宽
     const midX = (s.x + t.x) / 2
     const midY = (s.y + t.y) / 2
+    const label = link.nic || link.bandwidth
     linkG.append('text')
-      .attr('x', midX).attr('y', midY - 5)
+      .attr('x', midX).attr('y', midY - 4)
       .attr('text-anchor', 'middle')
       .attr('fill', color)
-      .attr('font-size', '9px')
+      .attr('font-size', portCount > 1 ? '8px' : '9px')
       .attr('pointer-events', 'none')
-      .text(link.bandwidth)
+      .text(label)
   })
 
   // ── 节点 ────────────────────────────────────────────────────
@@ -480,7 +507,11 @@ const renderTopology = () => {
       }
 
       // 主圆
-      const nodeFills = { master: '#1e3a5f', slave: '#1e293b', sensor: '#2d1b4e', mgmt_station: '#1a2e1a' }
+      const nodeFills = {
+        master: '#1e3a5f', slave: '#1e293b',
+        subswath: '#1a2e20', gstorage: '#2e1e1a',
+        sensor: '#2d1b4e', mgmt_station: '#1a2e1a',
+      }
       ng.append('circle')
         .attr('r', r)
         .attr('fill', nodeFills[node.type] || '#1e293b')
