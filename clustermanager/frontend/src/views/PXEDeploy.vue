@@ -409,79 +409,102 @@
            Tab 4: 分批部署
            ══════════════════════════════════════════════════════════ -->
       <el-tab-pane label="分批部署" name="deploy">
+        <!-- ── PXE Host 首次装机引导（一次性 Bootstrap，默认折叠）── -->
+        <el-card shadow="never" class="bootstrap-card" style="margin-bottom:14px">
+          <div class="bootstrap-header" @click="bootstrapExpanded = !bootstrapExpanded">
+            <el-icon class="caret" :class="{ rotated: bootstrapExpanded }"><CaretRight /></el-icon>
+            <span class="bootstrap-title">PXE Host 首次装机引导</span>
+            <el-tag size="small" effect="plain" type="info">Bootstrap · 一次性</el-tag>
+            <span class="bootstrap-status" :style="{ color: bootstrapStateColor }">
+              · {{ bootstrapStateLabel }}
+            </span>
+            <span style="flex:1"></span>
+            <el-button size="small" link @click.stop="openPxeHostEdit">
+              <el-icon><Edit /></el-icon> 配置
+            </el-button>
+          </div>
+
+          <div v-if="bootstrapExpanded" class="bootstrap-body">
+            <el-alert type="info" :closable="false" style="margin-bottom:12px">
+              <template #title>
+                仅在 PXE Host 首次部署时使用 — 通过 BMC Redfish 把本地 ISO 挂为虚拟光驱触发一次性 CD 引导。
+                PXE Host 装好后稳定运行，不需要重复执行此操作。
+              </template>
+            </el-alert>
+            <el-row :gutter="16">
+              <el-col :span="14">
+                <el-descriptions :column="2" border size="small">
+                  <el-descriptions-item label="主机名">{{ pxeHostCfg.hostname || '—' }}</el-descriptions-item>
+                  <el-descriptions-item label="BMC IP">
+                    <span class="ip-text">{{ pxeHostCfg.bmc_ip || '—' }}</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="控制面 IP">
+                    <span class="ip-text">{{ pxeHostCfg.ctrl_ip || '—' }}</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="ISO HTTP 地址">
+                    <span class="ip-text">
+                      {{ pxeHostCfg.iso_http_host }}:{{ pxeHostCfg.iso_http_port }}
+                    </span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="ISO 文件" :span="2">
+                    <el-tag v-if="pxeHostCfg.iso_filename" type="warning" size="small">
+                      {{ pxeHostCfg.iso_filename }}
+                    </el-tag>
+                    <span v-else class="text-muted">未选择</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="Redfish 路径" :span="2">
+                    <code class="redfish-path">
+                      Managers/{{ pxeHostCfg.redfish_manager_id }} /
+                      VirtualMedia/{{ pxeHostCfg.redfish_virtual_media_id }} /
+                      Systems/{{ pxeHostCfg.redfish_system_id }}
+                    </code>
+                  </el-descriptions-item>
+                </el-descriptions>
+              </el-col>
+              <el-col :span="10">
+                <div class="wave-check">
+                  <b>装机流程（Redfish 三步）：</b>
+                  <code>1. InsertMedia → 挂载 ISO</code>
+                  <code>2. PATCH Boot=Cd / Once</code>
+                  <code>3. ComputerSystem.Reset</code>
+                </div>
+                <div class="wave-meta" style="margin-top:6px">
+                  <el-icon><Clock /></el-icon> 预计 ~15 min（仅首次）
+                </div>
+                <el-button
+                  type="warning"
+                  style="margin-top:12px;width:100%"
+                  @click="installPxeHost"
+                  :loading="installingPxeHost"
+                  :disabled="!pxeHostCfg.iso_filename || !pxeHostCfg.bmc_ip
+                             || bootstrapState === 'online' || bootstrapState === 'installing'"
+                >
+                  {{ bootstrapState === 'online' ? 'PXE Host 已就绪'
+                     : bootstrapState === 'installing' ? '装机进行中…'
+                     : '开始首次装机' }}
+                </el-button>
+                <el-button
+                  v-if="bootstrapState === 'online' || bootstrapState === 'error'"
+                  size="small" link type="danger"
+                  style="margin-top:6px;width:100%"
+                  @click="installPxeHost(true)"
+                >
+                  ⚠ 强制重新装机（覆盖现有系统）
+                </el-button>
+              </el-col>
+            </el-row>
+          </div>
+        </el-card>
+
         <el-alert type="warning" :closable="false" style="margin-bottom:16px">
           <template #title>
-            <b>部署顺序：第零批（PXE Host 自部署） → 第一批 → 第二批 → 第三批</b>
+            <b>分批部署顺序：第一批 → 等待 NFS 就绪 → 第二批 → 等待大页就绪 → 第三批</b>
           </template>
           <div style="margin-top:6px;font-size:13px;color:#b0b0b0">
-            管理站（Windows）通过 BMC 虚拟介质把 ISO 挂给 PXE Host 自动装机；之后 PXE Host
-            为其余节点提供 DHCP/TFTP/HTTP 引导。
+            前提：PXE Host 已装机就绪。Slave firstboot 会轮询 NFS Server，Server 就绪前不会挂载；
+            Master firstboot 会自动 reboot 一次（大页/驱动生效）。
           </div>
         </el-alert>
-
-        <!-- 第零批：PXE Host 自部署（Redfish 虚拟介质） -->
-        <el-card shadow="never" class="wave-card wave-zero" style="margin-bottom:16px">
-          <template #header>
-            <div class="wave-header">
-              <el-tag type="danger" size="large">第零批</el-tag>
-              <span>PXE Host（Redfish 虚拟介质 → ISO 自部署）</span>
-              <el-button size="small" style="margin-left:auto" @click="openPxeHostEdit">
-                <el-icon><Edit /></el-icon> 配置
-              </el-button>
-            </div>
-          </template>
-          <el-row :gutter="16">
-            <el-col :span="14">
-              <el-descriptions :column="2" border size="small">
-                <el-descriptions-item label="主机名">{{ pxeHostCfg.hostname || '—' }}</el-descriptions-item>
-                <el-descriptions-item label="BMC IP">
-                  <span class="ip-text">{{ pxeHostCfg.bmc_ip || '—' }}</span>
-                </el-descriptions-item>
-                <el-descriptions-item label="控制面 IP">
-                  <span class="ip-text">{{ pxeHostCfg.ctrl_ip || '—' }}</span>
-                </el-descriptions-item>
-                <el-descriptions-item label="ISO HTTP 地址">
-                  <span class="ip-text">
-                    {{ pxeHostCfg.iso_http_host }}:{{ pxeHostCfg.iso_http_port }}
-                  </span>
-                </el-descriptions-item>
-                <el-descriptions-item label="ISO 文件" :span="2">
-                  <el-tag v-if="pxeHostCfg.iso_filename" type="warning" size="small">
-                    {{ pxeHostCfg.iso_filename }}
-                  </el-tag>
-                  <span v-else class="text-muted">未选择</span>
-                </el-descriptions-item>
-                <el-descriptions-item label="Redfish 路径" :span="2">
-                  <code class="redfish-path">
-                    Managers/{{ pxeHostCfg.redfish_manager_id }} /
-                    VirtualMedia/{{ pxeHostCfg.redfish_virtual_media_id }} /
-                    Systems/{{ pxeHostCfg.redfish_system_id }}
-                  </code>
-                </el-descriptions-item>
-              </el-descriptions>
-            </el-col>
-            <el-col :span="10">
-              <div class="wave-check">
-                <b>部署流程（Redfish 三步）：</b>
-                <code>1. InsertMedia → 挂载 ISO</code>
-                <code>2. PATCH Boot=Cd / Once</code>
-                <code>3. ComputerSystem.Reset</code>
-              </div>
-              <div class="wave-meta" style="margin-top:6px">
-                <el-icon><Clock /></el-icon> 预计 ~15 min
-              </div>
-              <el-button
-                type="danger"
-                style="margin-top:12px;width:100%"
-                @click="triggerWaveDeploy(0)"
-                :loading="deployingWave === 0"
-                :disabled="!pxeHostCfg.iso_filename || !pxeHostCfg.bmc_ip"
-              >
-                触发 PXE Host 自部署
-              </el-button>
-            </el-col>
-          </el-row>
-        </el-card>
 
         <el-row :gutter="16">
           <!-- 第一批: SubSwath + GStorage -->
@@ -907,7 +930,7 @@
 import { ref, onMounted, computed } from 'vue'
 import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Search, Clock, Plus, Minus, Edit } from '@element-plus/icons-vue'
+import { Refresh, Search, Clock, Plus, Minus, Edit, CaretRight } from '@element-plus/icons-vue'
 
 // ── 全局状态 ──────────────────────────────────────────────────────────────────
 const activeTab = ref('planning')
@@ -1085,7 +1108,7 @@ function copyText(text) {
 }
 
 // ── Tab4: 分批部署 ────────────────────────────────────────────────────────────
-const deployingWave = ref(-1)   // -1=空闲；0/1/2/3 部署中
+const deployingWave = ref(0)
 const queryMac = ref('')
 const queryingEnv = ref(false)
 const nodeEnvResult = ref('')
@@ -1100,7 +1123,7 @@ function waveNodes(wave) {
   return nodeList.value.filter(n => WAVE_ROLES[wave]?.includes(n.role))
 }
 
-// PXE Host 自部署配置
+// PXE Host 首次装机（Bootstrap，一次性）
 const pxeHostCfg = ref({
   hostname: '', bmc_ip: '', ctrl_ip: '',
   iso_http_host: '', iso_http_port: 8000,
@@ -1110,14 +1133,81 @@ const pxeHostCfg = ref({
 const pxeHostEditVisible = ref(false)
 const pxeHostForm = ref({})
 const savingPxeHost = ref(false)
+const installingPxeHost = ref(false)
 const isoList = ref([])
 const isoDir = ref('')
+const bootstrapExpanded = ref(false)
+const bootstrapState = ref('not_configured')   // not_configured / not_installed / installing / online / error
+
+const BOOTSTRAP_STATE_LABELS = {
+  not_configured: '未配置',
+  not_installed:  '已配置，待装机',
+  installing:     '装机进行中',
+  online:         '已就绪',
+  error:          '上次装机失败',
+}
+const BOOTSTRAP_STATE_COLORS = {
+  not_configured: '#94a3b8',
+  not_installed:  '#fbbf24',
+  installing:     '#3b82f6',
+  online:         '#22c55e',
+  error:          '#f87171',
+}
+const bootstrapStateLabel = computed(() => BOOTSTRAP_STATE_LABELS[bootstrapState.value] || bootstrapState.value)
+const bootstrapStateColor = computed(() => BOOTSTRAP_STATE_COLORS[bootstrapState.value] || '#94a3b8')
 
 async function loadPxeHostConfig() {
   try {
     const res = await axios.get('/api/pxe/pxe-host/config')
     pxeHostCfg.value = res.data
   } catch {}
+}
+
+async function loadBootstrapState() {
+  try {
+    const res = await axios.get('/api/pxe/pxe-host/status')
+    bootstrapState.value = res.data.state
+    // 首次状态非 online 时默认展开，节省一步点击
+    if (!bootstrapExpanded.value && bootstrapState.value !== 'online') {
+      bootstrapExpanded.value = bootstrapState.value === 'not_configured'
+                              || bootstrapState.value === 'not_installed'
+                              || bootstrapState.value === 'error'
+    }
+  } catch {}
+}
+
+async function installPxeHost(force = false) {
+  if (!pxeHostCfg.value.bmc_ip || !pxeHostCfg.value.iso_filename) {
+    ElMessage.warning('请先在「配置」中填写 BMC IP 和选择 ISO')
+    return
+  }
+  const warnText = force
+    ? `⚠ 即将通过 BMC 强制重装 PXE Host (${pxeHostCfg.value.bmc_ip})，将覆盖现有系统！`
+    + `\n这是一次性 Bootstrap 操作，正常运行的 PXE Host 不应频繁触发。\n确认继续？`
+    : `将通过 Redfish 给 PXE Host (${pxeHostCfg.value.bmc_ip}) 挂载 ISO `
+    + `《${pxeHostCfg.value.iso_filename}》并强制重启进入安装。\n这是一次性首次装机操作，确认继续？`
+  try {
+    await ElMessageBox.confirm(warnText, force ? '确认强制重装 PXE Host' : '确认首次装机 PXE Host',
+      { type: force ? 'error' : 'warning' })
+  } catch { return }
+
+  installingPxeHost.value = true
+  try {
+    const res = await axios.post('/api/pxe/pxe-host/install')
+    const rf = res.data.redfish || {}
+    if (rf.ok) {
+      ElMessage.success('PXE Host 首次装机已触发：BMC 已挂载 ISO 并重启')
+    } else {
+      ElMessage.error(`Redfish 调用在阶段 [${rf.stage}] 失败，请检查 BMC 凭据 / VirtualMedia ID`)
+    }
+    await loadBootstrapState()
+    activeTab.value = 'status'
+    await refreshDeployStatus()
+  } catch (e) {
+    ElMessage.error('触发失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    installingPxeHost.value = false
+  }
 }
 
 async function loadIsoList() {
@@ -1156,41 +1246,6 @@ async function savePxeHostConfig() {
 }
 
 async function triggerWaveDeploy(wave) {
-  // ── 第零批：PXE Host 自部署（Redfish）────────────────
-  if (wave === 0) {
-    if (!pxeHostCfg.value.bmc_ip || !pxeHostCfg.value.iso_filename) {
-      ElMessage.warning('请先在「配置」按钮中填写 BMC IP 和选择 ISO')
-      return
-    }
-    try {
-      await ElMessageBox.confirm(
-        `将通过 Redfish 给 PXE Host (${pxeHostCfg.value.bmc_ip}) 挂载 ISO `
-        + `《${pxeHostCfg.value.iso_filename}》并强制重启进入安装，确认继续？`,
-        '确认触发 PXE Host 自部署',
-        { type: 'warning' }
-      )
-    } catch { return }
-
-    deployingWave.value = 0
-    try {
-      const res = await axios.post('/api/pxe/wave-deploy/0')
-      const rf = res.data.redfish || {}
-      if (rf.ok) {
-        ElMessage.success('PXE Host 自部署已触发：BMC 已挂载 ISO 并重启')
-      } else {
-        ElMessage.error(`Redfish 调用在阶段 [${rf.stage}] 失败，请检查 BMC 凭据 / VirtualMedia ID`)
-      }
-      activeTab.value = 'status'
-      await refreshDeployStatus()
-    } catch (e) {
-      ElMessage.error('触发失败: ' + (e.response?.data?.detail || e.message))
-    } finally {
-      deployingWave.value = -1
-    }
-    return
-  }
-
-  // ── 第一/二/三批：按角色筛选并置 deploying 状态 ──────
   const nodes = waveNodes(wave)
   if (nodes.length === 0) {
     ElMessage.warning('nodes.json 中没有对应角色的节点，请先在「节点配置」标签中检查')
@@ -1214,7 +1269,7 @@ async function triggerWaveDeploy(wave) {
   } catch (e) {
     ElMessage.error('触发失败: ' + (e.response?.data?.detail || e.message))
   } finally {
-    deployingWave.value = -1
+    deployingWave.value = 0
   }
 }
 
@@ -1343,7 +1398,12 @@ function statusTagType(status) {
 
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 onMounted(async () => {
-  await Promise.all([loadNodeList(), refreshDeployStatus(), loadPxeHostConfig()])
+  await Promise.all([
+    loadNodeList(),
+    refreshDeployStatus(),
+    loadPxeHostConfig(),
+    loadBootstrapState(),
+  ])
 })
 </script>
 
@@ -1431,10 +1491,40 @@ onMounted(async () => {
 .stage-text { margin-left: 8px; font-size: 12px; color: #aaa; }
 .ip-text    { font-family: monospace; font-size: 12px; color: #93c5fd; }
 
-.wave-zero {
-  border-left: 3px solid #f56c6c;
+.bootstrap-card {
+  border-left: 2px solid #475569;
+  background: rgba(15, 23, 42, 0.4);
 }
-.wave-zero .wave-header { width: 100%; }
+.bootstrap-card :deep(.el-card__body) { padding: 0; }
+.bootstrap-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.bootstrap-header:hover { background: rgba(255,255,255,0.03); }
+.bootstrap-header .caret {
+  transition: transform 0.2s;
+  color: #64748b;
+  font-size: 14px;
+}
+.bootstrap-header .caret.rotated { transform: rotate(90deg); }
+.bootstrap-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+.bootstrap-status {
+  font-size: 12px;
+  font-weight: 500;
+}
+.bootstrap-body {
+  padding: 8px 16px 16px;
+  border-top: 1px solid #1e293b;
+}
 .redfish-path {
   background: #0d1b2e;
   color: #9cdcfe;

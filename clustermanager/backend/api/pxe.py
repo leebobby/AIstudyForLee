@@ -426,17 +426,16 @@ class ScriptRunRequest(BaseModel):
 
 
 _WAVE_ROLES: dict = {
-    0: ["pxe_host"],            # 第零批：PXE Host 自身（Redfish 虚拟介质）
     1: ["subswath", "gstorage"],
     2: ["master"],
     3: ["slave"],
 }
 
 
-def _wave0_redfish_deploy(db: Session) -> dict:
+def _pxe_host_install_via_redfish(db: Session) -> dict:
     """
-    第零批：用 Redfish 虚拟介质给 PXE Host 装机。
-    Windows 管理站把本地 ISO 通过 HTTP 暴露给 BMC，BMC 拉 ISO 引导。
+    PXE Host 一次性装机（Bootstrap）：通过 Redfish 虚拟介质把 ISO 挂为 BMC 虚拟光驱。
+    仅在 PXE Host 首次部署时使用 — PXE Host 装好后稳定运行，无需重复触发。
     """
     cfg = pxe_service_v2.read_pxe_host_config()
     bmc_ip   = cfg.get("bmc_ip", "")
@@ -493,28 +492,33 @@ def _wave0_redfish_deploy(db: Session) -> dict:
     db.commit()
 
     return {
-        "wave": 0,
-        "roles": ["pxe_host"],
-        "triggered": 1 if redfish_result["ok"] else 0,
-        "nodes": [hostname],
+        "ok": redfish_result["ok"],
+        "hostname": hostname,
         "iso": iso_file,
         "image_url": image_url,
         "redfish": redfish_result,
     }
 
 
+@router.post("/pxe-host/install")
+def install_pxe_host(db: Session = Depends(get_db)):
+    """
+    PXE Host 首次装机（Bootstrap，一次性）：通过 Redfish 虚拟介质挂载 ISO 触发自动装机。
+    PXE Host 装好后无需重复触发 — 后续节点部署走 /wave-deploy/1|2|3。
+    """
+    return _pxe_host_install_via_redfish(db)
+
+
 @router.post("/wave-deploy/{wave}")
 def trigger_wave_deploy(wave: int, db: Session = Depends(get_db)):
     """
-    触发分批部署：
-      wave=0 → PXE Host 自身（Redfish 虚拟介质 + ISO 引导）
-      wave=1/2/3 → 从 nodes.json 读取对应角色，置 DB 状态为 deploying
+    触发分批部署：从 nodes.json 读取对应角色节点并置 DB 状态为 deploying。
+      wave=1 → SubSwath + GStorage
+      wave=2 → Master
+      wave=3 → Slave
     """
     if wave not in _WAVE_ROLES:
-        raise HTTPException(status_code=400, detail="wave 必须为 0 / 1 / 2 / 3")
-
-    if wave == 0:
-        return _wave0_redfish_deploy(db)
+        raise HTTPException(status_code=400, detail="wave 必须为 1 / 2 / 3")
 
     roles = _WAVE_ROLES[wave]
     nodes_json = pxe_service_v2.read_nodes_json()
@@ -614,6 +618,45 @@ def list_pxe_host_iso():
     return {
         "iso_dir": str(ISO_DIR),
         "files": pxe_service_v2.list_iso_files(ISO_DIR),
+    }
+
+
+@router.get("/pxe-host/status")
+def get_pxe_host_status(db: Session = Depends(get_db)):
+    """
+    返回 PXE Host 当前部署状态，用于前端判断是否需要做 Bootstrap：
+      not_configured —— 尚未填写 BMC/ISO 配置
+      not_installed   —— 配置已就绪，但从未触发过装机
+      installing      —— 装机进行中（DB 中 status=deploying）
+      online          —— PXE Host 已就绪可用
+      error           —— 上次装机失败
+    """
+    cfg = pxe_service_v2.read_pxe_host_config()
+    hostname = cfg.get("hostname") or "host-server"
+    has_config = bool(cfg.get("bmc_ip") and cfg.get("iso_filename"))
+
+    db_node = db.query(Node).filter(Node.hostname == hostname).first()
+
+    if not has_config and not db_node:
+        state = "not_configured"
+    elif not db_node:
+        state = "not_installed"
+    elif db_node.status == "deploying":
+        state = "installing"
+    elif db_node.status == "online":
+        state = "online"
+    elif db_node.status == "error":
+        state = "error"
+    else:
+        state = db_node.status or "not_installed"
+
+    return {
+        "state": state,
+        "hostname": hostname,
+        "bmc_ip": cfg.get("bmc_ip", ""),
+        "ctrl_ip": cfg.get("ctrl_ip", ""),
+        "iso_filename": cfg.get("iso_filename", ""),
+        "has_config": has_config,
     }
 
 

@@ -32,8 +32,8 @@
 - **IP 规划**：六子网固定方案，一键生成全角色 IP 表
 - **nodes.json 管理**：22 节点 MAC→配置映射，支持在线编辑 MAC 地址
 - **配置生成**：dhcpd.conf、grub.cfg（aarch64 UEFI）、RAID1 初始化脚本、PXE 启动脚本
-- **分批部署**：第零批（PXE Host 自部署 / Redfish 虚拟介质）→ 第一批（SubSwath+GStorage）→ 第二批（Master）→ 第三批（Slave）
-- **PXE Host 自部署**：Windows 管理站通过 BMC Redfish 把本地 ISO 挂为虚拟光驱，PXE Host 一次性 CD 引导完成装机，无需手动插盘
+- **PXE Host 首次装机引导（Bootstrap，一次性）**：Windows 管理站通过 BMC Redfish 把本地 ISO 挂为虚拟光驱，PXE Host 一次性 CD 引导完成装机；装好后稳定运行，不需要重复执行
+- **分批部署**：第一批（SubSwath+GStorage）→ 第二批（Master）→ 第三批（Slave）— PXE Host 装机就绪后开始
 - **node-env API**：`GET /api/pxe/node-env?mac=<MAC>` 供 firstboot detect.sh 获取差异化配置
 
 ### 2. 集群管理
@@ -111,9 +111,11 @@ clustermanager/
 | `GET  /api/pxe/grub-config` | 生成 grub.cfg |
 | `GET  /api/pxe/setup-raid1-script` | 生成 RAID1 初始化脚本 |
 | `GET  /api/pxe/pxe-boot-script` | 生成 PXE 启动脚本 |
-| `POST /api/pxe/wave-deploy/{0\|1\|2\|3}` | 分批部署（0=PXE Host 自部署，1/2/3=普通节点） |
-| `GET  /api/pxe/pxe-host/config` | 读取 PXE Host 自部署配置 |
-| `PUT  /api/pxe/pxe-host/config` | 更新 PXE Host 自部署配置 |
+| `POST /api/pxe/wave-deploy/{1\|2\|3}` | 分批部署普通节点（前提：PXE Host 已就绪） |
+| `POST /api/pxe/pxe-host/install` | PXE Host 首次装机引导（Bootstrap，Redfish 虚拟介质） |
+| `GET  /api/pxe/pxe-host/status` | PXE Host 部署状态（not_configured / not_installed / installing / online / error） |
+| `GET  /api/pxe/pxe-host/config` | 读取 PXE Host 装机配置 |
+| `PUT  /api/pxe/pxe-host/config` | 更新 PXE Host 装机配置 |
 | `GET  /api/pxe/pxe-host/iso-list` | 列出 Windows 安装目录下可用 ISO |
 
 ## 生产部署（OpenEuler ARM → Windows 浏览器访问）
@@ -257,23 +259,27 @@ cluster-manager-linux-arm64.tar.gz
 
 ## 变更记录
 
-### 2026-05-08 — Windows 管理站 + PXE Host 自部署（第零批 / Redfish 虚拟介质）
+### 2026-05-08 — Windows 管理站 + PXE Host 首次装机引导（Bootstrap，一次性）
 
-将 cluster-manager 由"运行在 PXE Host 上"改为"运行在独立 Windows 管理站上"，并新增第零批部署能力 ——
-管理站通过 BMC Redfish API 把本地 ISO 挂为 PXE Host 的虚拟光驱，触发其一次性 CD 引导完成自动装机；
-之后 PXE Host 再为其余节点提供 DHCP / TFTP / HTTP 引导服务。
+将 cluster-manager 由"运行在 PXE Host 上"改为"运行在独立 Windows 管理站上"。
+PXE Host 装好后稳定运行（持续给其他节点提供 DHCP/TFTP/HTTP），不需要每次都重装；管理站只在
+**首次部署**时通过 BMC Redfish 把本地 ISO 挂为 PXE Host 的虚拟光驱，触发其一次性 CD 引导完成自动装机。
 
 | 文件 | 变更 |
 |------|------|
 | `backend/config.py` | 新增 `ISO_DIR`（环境变量 `CLUSTER_MANAGER_ISO_DIR`，默认 `<安装目录>/iso/`） |
 | `backend/services/redfish_service.py` | **新文件** — `RedfishClient.deploy_iso()` 三步法：InsertMedia → Boot=Cd/Once → ComputerSystem.Reset；支持华为 iBMC / Dell iDRAC / 标准 DMTF |
 | `backend/services/pxe_service.py` | 新增 `pxe_host.json` 独立配置文件（BMC IP/凭据 + Redfish ID + ISO HTTP 主机端口）；`read/write_pxe_host_config()`、`list_iso_files()` |
-| `backend/api/pxe.py` | `_WAVE_ROLES[0] = ["pxe_host"]`；`POST /wave-deploy/0` 走 `_wave0_redfish_deploy()`（不调 PXE）；新增 `GET/PUT /pxe-host/config`、`GET /pxe-host/iso-list` |
+| `backend/api/pxe.py` | 新增 `POST /pxe-host/install`（语义清晰的 Bootstrap 端点）、`GET /pxe-host/status`（5 态：not_configured / not_installed / installing / online / error）、`GET/PUT /pxe-host/config`、`GET /pxe-host/iso-list`；`wave-deploy/{wave}` 仅允许 1/2/3 — PXE Host 装机不再混在分批序列里 |
 | `backend/main.py` | 挂载 `/iso/` 静态目录给 BMC 拉 ISO（必须早于 SPA catch-all） |
-| `backend/api/network.py` | `mgmt-station` 节点改名为「管理站 (Windows)」并连入控制面；新增 `pxe-host` 节点（Redfish 链路 + DHCP/TFTP/HTTP 上行至控制交换机）；wave 1/2/3 循环跳过 pxe_host 角色避免重复 |
+| `backend/api/network.py` | `mgmt-station` 节点改名为「管理站 (Windows)」并连入控制面；新增 `pxe-host` 节点（Redfish 链路 + DHCP/TFTP/HTTP 上行至控制交换机） |
 | `backend/requirements.txt` | 新增 `httpx>=0.25.0`（Redfish HTTPS 调用） |
-| `frontend/src/views/PXEDeploy.vue` | 分批部署 Tab 顶部新增「第零批」红色高亮卡片：显示 BMC/控制面 IP、ISO HTTP 地址、Redfish 路径；触发按钮调 `/wave-deploy/0`；右上「配置」按钮打开 PXE Host 编辑对话框（基本/BMC Redfish/ISO 三段） |
+| `frontend/src/views/PXEDeploy.vue` | 分批部署 Tab 顶部独立的「PXE Host 首次装机引导」**默认折叠**卡片，明确标注 `Bootstrap · 一次性`；状态指示器（5 态彩色）；按钮根据状态显示「开始首次装机 / 装机进行中… / PXE Host 已就绪」；线上态额外提供「⚠ 强制重新装机」二次确认按钮防误触；分批部署 alert 文案不再提"第零批" |
 | `frontend/src/views/NetworkMap.vue` | `NODE_TYPE_LABEL` / `NODE_R` / `NODE_ICON` / `nodeFills` 加 `pxe_host`（图标 P，红棕色填充）；`computePositions()` 把 PXE Host 放在管理层右侧 |
+
+**关键定位**：PXE Host 装机是一次性 Bootstrap 操作，不属于"每次都要做的分批部署"。UI 上独立折叠、按钮在
+`online` 状态时禁用并显示"已就绪"，强制重装走单独的红色二次确认通道；API 上拆出 `/pxe-host/install`
+和 `/wave-deploy/{1|2|3}`，避免语义混淆。
 
 **ISO 准备**：把 PXE Host 部署 ISO（如 `openeuler-pxe-host.iso`）放到 Windows 管理站安装目录下的 `iso/` 子目录。
 ISO 内的 kickstart/firstboot 应包含 dhcpd / tftp-server / nginx 等服务的安装与启动，使 PXE Host 装完即可对外服务。
