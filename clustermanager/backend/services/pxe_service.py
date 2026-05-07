@@ -410,6 +410,7 @@ IBMC_PASS=your_password
                 "mac":              mac,
                 "hostname":         node.get("hostname_new", ""),
                 "role":             node.get("role", ""),
+                "ctrl_nic":         node.get("ctrl_nic", ""),
                 "ctrl_ip":          node.get("ctrl_ip", "").split("/")[0],
                 "bmc_ip":           node.get("bmc_ip", ""),
                 "rdma_nics":        node.get("rdma_nics", ""),

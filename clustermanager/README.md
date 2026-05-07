@@ -252,6 +252,32 @@ cluster-manager-linux-arm64.tar.gz
 
 ## 变更记录
 
+### 2026-05-08 — PXE 页面优化：暗色 Tab / NIC 编辑 / 自定义脚本 / 组网图 BMC 跳转
+
+**涉及文件**：
+- `frontend/src/views/PXEDeploy.vue`
+- `frontend/src/views/NetworkMap.vue`
+- `backend/api/pxe.py`
+- `backend/services/pxe_service.py`
+
+**变更详情**：
+
+| # | 变更点 | 说明 |
+|---|--------|------|
+| 1 | **Tab 暗色主题** | 用 `.dark-tabs` 覆盖 `el-tabs--border-card` 默认白色背景；未激活 `#64748b`，激活 `#3b82f6`（蓝色），与整体深蓝主题协调 |
+| 2 | **节点 NIC/IP 编辑** | 节点配置编辑对话框扩展为 MAC → 控制面 NIC → DPDK 网卡（仅 master）→ RDMA 网卡四个区块；每行含网卡名（如 `enp129s0f0`）和 IP/掩码（如 `200.1.1.11/24`）输入，支持动态增删行；新增后端 `PATCH /api/pxe/nodes-json/update-node` |
+| 3 | **自定义脚本** | 分批部署页新增"自定义脚本"卡片：节点多选 + SSH 用户/密码 + 脚本编辑器 + 结果表格；新增后端 `POST /api/pxe/run-script`，通过 paramiko 并发 SSH 到各节点控制面 IP 执行脚本 |
+| 4 | **组网图 BMC 跳转** | 点击拓扑图节点，右侧详情面板底部显示"打开 BMC 管理界面"按钮，提取 `planes.management.bmc_ip` 在新标签页打开 `https://<bmc_ip>` |
+
+**新增后端接口**：
+
+| 接口 | 说明 |
+|------|------|
+| `PATCH /api/pxe/nodes-json/update-node` | 更新节点 ctrl_nic / dpdk_nics / dpdk_ips / rdma_nics / rdma_ips |
+| `POST  /api/pxe/run-script` | SSH 并发执行自定义脚本，返回每节点状态和输出 |
+
+---
+
 ### 2026-05-05 — 节点管理页支持手动新增/编辑/删除节点
 
 **背景**：已完成 PXE 部署的集群可直接通过 UI 手动录入节点信息，无需再走 PXE 流程，实现组网图和后续监控功能。

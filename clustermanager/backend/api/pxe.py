@@ -2,11 +2,37 @@
 PXE 部署 API v2 - 鲲鹏集群 22 节点三平面部署
 """
 
+import asyncio
+import functools
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+
+_executor = ThreadPoolExecutor(max_workers=8)
+
+
+def _ssh_run(host: str, user: str, password: Optional[str], port: int, script: str) -> str:
+    import paramiko
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        connect_kwargs: Dict[str, Any] = {
+            "hostname": host, "port": port,
+            "username": user, "timeout": 30,
+        }
+        if password:
+            connect_kwargs["password"] = password
+        client.connect(**connect_kwargs)
+        _, stdout, stderr = client.exec_command(script, timeout=120)
+        out = stdout.read().decode("utf-8", errors="replace")
+        err = stderr.read().decode("utf-8", errors="replace")
+        return (out + (("\nSTDERR:\n" + err) if err.strip() else "")).strip()
+    finally:
+        client.close()
 
 from models.node import Node, PXEConfig, get_db
 from pydantic import BaseModel
@@ -280,3 +306,66 @@ def get_setup_raid1_script():
 def get_pxe_boot_script():
     """生成 ipmitool 批量设置 PXE 启动的脚本"""
     return pxe_service_v2.generate_pxe_boot_script()
+
+
+class NodeFieldsUpdate(BaseModel):
+    """更新 nodes.json 中指定节点的 NIC / IP 字段"""
+    mac: str
+    ctrl_nic: Optional[str] = None
+    dpdk_nics: Optional[str] = None
+    dpdk_ips: Optional[str] = None
+    rdma_nics: Optional[str] = None
+    rdma_ips: Optional[str] = None
+
+
+@router.patch("/nodes-json/update-node")
+def update_node_fields(req: NodeFieldsUpdate):
+    """更新节点控制面/DPDK/RDMA 网卡名和 IP（保留 MAC 不变）"""
+    data = pxe_service_v2.read_nodes_json()
+    mac = req.mac.lower()
+    if mac not in data:
+        raise HTTPException(status_code=404, detail=f"MAC {mac} 不在 nodes.json 中")
+    updates = {k: v for k, v in req.dict(exclude={"mac"}).items() if v is not None}
+    if not updates:
+        return {"message": "无字段需要更新"}
+    data[mac].update(updates)
+    pxe_service_v2.write_nodes_json(data)
+    return {"message": "节点配置已更新", "mac": mac, "updated": list(updates.keys())}
+
+
+class ScriptRunRequest(BaseModel):
+    macs: List[str]
+    script: str
+    ssh_user: str = "root"
+    ssh_password: Optional[str] = None
+    ssh_port: int = 22
+
+
+@router.post("/run-script")
+async def run_script(req: ScriptRunRequest):
+    """通过 SSH 在指定节点（控制面 IP）上执行 Shell 脚本"""
+    nodes_json = pxe_service_v2.read_nodes_json()
+    loop = asyncio.get_event_loop()
+    results: List[Dict[str, Any]] = []
+    pending = []
+
+    for mac in req.macs:
+        node = nodes_json.get(mac.lower())
+        if not node:
+            results.append({"hostname": mac, "status": "error", "output": "MAC 未在 nodes.json 中配置"})
+            continue
+        ctrl_ip = node.get("ctrl_ip", "").split("/")[0]
+        hostname = node.get("hostname_new", mac)
+        fn = functools.partial(
+            _ssh_run, ctrl_ip, req.ssh_user, req.ssh_password, req.ssh_port, req.script
+        )
+        pending.append((hostname, loop.run_in_executor(_executor, fn)))
+
+    for hostname, fut in pending:
+        try:
+            output = await fut
+            results.append({"hostname": hostname, "status": "success", "output": output})
+        except Exception as exc:
+            results.append({"hostname": hostname, "status": "error", "output": str(exc)})
+
+    return results

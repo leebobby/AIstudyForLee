@@ -83,6 +83,13 @@
               </div>
             </div>
           </template>
+          <!-- BMC 快速跳转 -->
+          <div v-if="getNodeBmcIp(selected.data)" class="bmc-action">
+            <div class="bmc-ip-hint">BMC: {{ getNodeBmcIp(selected.data) }}</div>
+            <el-button type="primary" size="small" @click="openBmc(selected.data)">
+              打开 BMC 管理界面
+            </el-button>
+          </div>
         </template>
 
         <!-- 链路详情 -->
@@ -532,6 +539,15 @@ const renderEmpty = (W, H) => {
 
 const pct = (online, total) => (!total ? 0 : Math.round((online / total) * 100))
 
+const getNodeBmcIp = (node) =>
+  node.planes?.management?.bmc_ip || node.bmc_ip || null
+
+const openBmc = (node) => {
+  const ip = getNodeBmcIp(node)
+  if (!ip) { ElMessage.warning('该节点无 BMC IP 信息'); return }
+  window.open(`https://${ip}`, '_blank')
+}
+
 onMounted(() => {
   loadAll()
   window.addEventListener('resize', renderTopology)
@@ -671,6 +687,18 @@ onUnmounted(() => {
   color: #64748b;
 }
 .stat-desc { color: #475569 !important; font-size: 11px !important; }
+
+.bmc-action {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #1e293b;
+}
+.bmc-ip-hint {
+  font-size: 11px;
+  color: #64748b;
+  font-family: monospace;
+  margin-bottom: 8px;
+}
 
 @media (max-width: 900px) {
   .stats-grid { grid-template-columns: repeat(2, 1fr); }

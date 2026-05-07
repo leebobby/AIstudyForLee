@@ -1,6 +1,6 @@
 <template>
   <div class="pxe-deploy">
-    <el-tabs v-model="activeTab" type="border-card">
+    <el-tabs v-model="activeTab" type="border-card" class="dark-tabs">
 
       <!-- ══════════════════════════════════════════════════════════
            Tab 1: IP 规划
@@ -169,14 +169,14 @@
                 <el-tag :type="roleTagType(row.role)" size="small">{{ row.role }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="MAC 地址" width="170">
+            <el-table-column label="MAC 地址" width="180">
               <template #default="{ row }">
                 <span class="mac-text">{{ row.mac }}</span>
                 <el-button
                   link
                   size="small"
                   style="margin-left:4px"
-                  @click="openMacEdit(row)"
+                  @click="openNodeEdit(row)"
                 >编辑</el-button>
               </template>
             </el-table-column>
@@ -215,26 +215,75 @@
           </el-table>
         </el-card>
 
-        <!-- MAC 编辑对话框 -->
-        <el-dialog v-model="macEditVisible" title="修改节点 MAC 地址" width="480px">
-          <el-form label-width="100px">
-            <el-form-item label="主机名">
-              <el-input :value="macEditRow.hostname" disabled />
-            </el-form-item>
+        <!-- 节点配置编辑对话框 -->
+        <el-dialog v-model="nodeEditVisible" title="编辑节点配置" width="660px" :close-on-click-modal="false">
+          <el-descriptions :column="2" border size="small" style="margin-bottom:14px">
+            <el-descriptions-item label="主机名">{{ nodeEditRow.hostname }}</el-descriptions-item>
+            <el-descriptions-item label="角色">
+              <el-tag :type="roleTagType(nodeEditRow.role)" size="small">{{ nodeEditRow.role }}</el-tag>
+            </el-descriptions-item>
+          </el-descriptions>
+
+          <el-form label-width="110px" size="small">
+            <el-divider content-position="left">MAC 地址</el-divider>
             <el-form-item label="当前 MAC">
-              <el-input :value="macEditRow.mac" disabled />
+              <el-input :value="nodeEditRow.mac" disabled style="width:230px;font-family:monospace" />
             </el-form-item>
             <el-form-item label="新 MAC">
-              <el-input
-                v-model="macEditNew"
-                placeholder="例: 00:11:22:33:44:55"
-                clearable
-              />
+              <el-input v-model="nodeEditForm.newMac" placeholder="00:11:22:33:44:55" style="width:230px" />
             </el-form-item>
+
+            <el-divider content-position="left">控制面</el-divider>
+            <el-form-item label="控制面网卡名">
+              <el-input v-model="nodeEditForm.ctrl_nic" placeholder="如 eno1 / enp129s0f0" style="width:200px" />
+            </el-form-item>
+
+            <template v-if="nodeEditRow.role === 'master'">
+              <el-divider content-position="left">DPDK 网卡（100GE 数据面前段）</el-divider>
+              <div
+                v-for="(pair, idx) in nodeEditForm.dpdkPairs"
+                :key="'dpdk'+idx"
+                class="nic-row"
+              >
+                <span class="nic-idx">{{ idx + 1 }}</span>
+                <el-input v-model="pair.nic" placeholder="网卡名 如 enp129s0f0" style="width:175px" />
+                <el-input v-model="pair.ip" placeholder="IP/掩码 如 200.1.1.11/24" style="width:195px" />
+                <el-button size="small" :disabled="nodeEditForm.dpdkPairs.length <= 1"
+                  @click="nodeEditForm.dpdkPairs.splice(idx, 1)">
+                  <el-icon><Minus /></el-icon>
+                </el-button>
+              </div>
+              <div class="nic-add-row">
+                <el-button size="small" @click="nodeEditForm.dpdkPairs.push({ nic: '', ip: '' })">
+                  <el-icon><Plus /></el-icon> 添加 DPDK 网卡
+                </el-button>
+              </div>
+            </template>
+
+            <el-divider content-position="left">RDMA 网卡（100GE 数据面后段）</el-divider>
+            <div
+              v-for="(pair, idx) in nodeEditForm.rdmaPairs"
+              :key="'rdma'+idx"
+              class="nic-row"
+            >
+              <span class="nic-idx">{{ idx + 1 }}</span>
+              <el-input v-model="pair.nic" placeholder="网卡名 如 enp130s0f0" style="width:175px" />
+              <el-input v-model="pair.ip" placeholder="IP/掩码 如 100.1.1.11/24" style="width:195px" />
+              <el-button size="small" :disabled="nodeEditForm.rdmaPairs.length <= 1"
+                @click="nodeEditForm.rdmaPairs.splice(idx, 1)">
+                <el-icon><Minus /></el-icon>
+              </el-button>
+            </div>
+            <div class="nic-add-row">
+              <el-button size="small" @click="nodeEditForm.rdmaPairs.push({ nic: '', ip: '' })">
+                <el-icon><Plus /></el-icon> 添加 RDMA 网卡
+              </el-button>
+            </div>
           </el-form>
+
           <template #footer>
-            <el-button @click="macEditVisible = false">取消</el-button>
-            <el-button type="primary" @click="saveMacEdit" :loading="savingMac">保存</el-button>
+            <el-button @click="nodeEditVisible = false">取消</el-button>
+            <el-button type="primary" @click="saveNodeEdit" :loading="savingNode">保存</el-button>
           </template>
         </el-dialog>
       </el-tab-pane>
@@ -492,6 +541,73 @@
           </el-col>
         </el-row>
 
+        <!-- 自定义脚本 -->
+        <el-card shadow="never" style="margin-top:16px">
+          <template #header><span>自定义脚本（部署后批量配置）</span></template>
+          <el-alert type="info" :closable="false" style="margin-bottom:14px">
+            <template #title>通过 SSH 在已部署节点上执行自定义 Shell 脚本，适用于软件安装、参数调整等部署后任务</template>
+          </el-alert>
+          <el-row :gutter="16">
+            <el-col :span="8">
+              <el-form label-width="80px" size="small">
+                <el-form-item label="目标节点">
+                  <el-select v-model="scriptTargets" multiple collapse-tags collapse-tags-tooltip
+                    placeholder="选择目标节点..." style="width:100%">
+                    <el-option
+                      v-for="node in nodeList"
+                      :key="node.mac"
+                      :label="`${node.hostname} (${node.ctrl_ip})`"
+                      :value="node.mac"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="SSH 用户">
+                  <el-input v-model="scriptSshUser" placeholder="root" style="width:130px" />
+                </el-form-item>
+                <el-form-item label="SSH 密码">
+                  <el-input v-model="scriptSshPassword" type="password" show-password
+                    placeholder="留空使用密钥" style="width:160px" />
+                </el-form-item>
+                <el-form-item>
+                  <el-button type="primary" @click="runCustomScript" :loading="runningScript"
+                    :disabled="!scriptTargets.length">
+                    执行脚本
+                  </el-button>
+                </el-form-item>
+              </el-form>
+            </el-col>
+            <el-col :span="16">
+              <div style="font-size:12px;color:#64748b;margin-bottom:6px">脚本内容（Shell）：</div>
+              <el-input
+                v-model="customScript"
+                type="textarea"
+                :rows="10"
+                class="code-textarea"
+                placeholder="#!/bin/bash&#10;# 在此输入自定义 Shell 脚本..."
+              />
+            </el-col>
+          </el-row>
+          <template v-if="scriptResult.length">
+            <el-divider />
+            <div style="font-size:12px;color:#64748b;margin-bottom:8px">执行结果：</div>
+            <el-table :data="scriptResult" size="small" stripe>
+              <el-table-column prop="hostname" label="节点" width="130" />
+              <el-table-column prop="status" label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag :type="row.status === 'success' ? 'success' : 'danger'" size="small">
+                    {{ row.status === 'success' ? '成功' : '失败' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="output" label="输出">
+                <template #default="{ row }">
+                  <pre class="script-output">{{ row.output || '(无输出)' }}</pre>
+                </template>
+              </el-table-column>
+            </el-table>
+          </template>
+        </el-card>
+
         <!-- node-env API 说明 -->
         <el-card shadow="never" style="margin-top:16px">
           <template #header><span>firstboot node-env API</span></template>
@@ -645,7 +761,7 @@
 import { ref, onMounted, computed } from 'vue'
 import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Search, Clock } from '@element-plus/icons-vue'
+import { Refresh, Search, Clock, Plus, Minus } from '@element-plus/icons-vue'
 
 // ── 全局状态 ──────────────────────────────────────────────────────────────────
 const activeTab = ref('planning')
@@ -696,10 +812,10 @@ async function applyPlanToNodesJson() {
 
 // ── Tab2: 节点配置 ────────────────────────────────────────────────────────────
 const nodeList = ref([])
-const macEditVisible = ref(false)
-const macEditRow = ref({})
-const macEditNew = ref('')
-const savingMac = ref(false)
+const nodeEditVisible = ref(false)
+const nodeEditRow = ref({})
+const nodeEditForm = ref({ newMac: '', ctrl_nic: '', dpdkPairs: [], rdmaPairs: [] })
+const savingNode = ref(false)
 
 async function loadNodeList() {
   try {
@@ -710,25 +826,53 @@ async function loadNodeList() {
   }
 }
 
-function openMacEdit(row) {
-  macEditRow.value = row
-  macEditNew.value = row.mac
-  macEditVisible.value = true
+function parsePairs(nics, ips) {
+  const nicArr = (nics || '').split(' ').filter(Boolean)
+  const ipArr  = (ips  || '').split(' ').filter(Boolean)
+  const len = Math.max(nicArr.length, ipArr.length, 1)
+  return Array.from({ length: len }, (_, i) => ({ nic: nicArr[i] || '', ip: ipArr[i] || '' }))
 }
 
-async function saveMacEdit() {
-  savingMac.value = true
+function openNodeEdit(row) {
+  nodeEditRow.value = row
+  nodeEditForm.value = {
+    newMac:    row.mac,
+    ctrl_nic:  row.ctrl_nic || 'eno1',
+    dpdkPairs: parsePairs(row.dpdk_nics, row.dpdk_ips),
+    rdmaPairs: parsePairs(row.rdma_nics, row.rdma_ips),
+  }
+  nodeEditVisible.value = true
+}
+
+async function saveNodeEdit() {
+  savingNode.value = true
   try {
-    await axios.patch('/api/pxe/nodes-json/update-mac', null, {
-      params: { old_mac: macEditRow.value.mac, new_mac: macEditNew.value }
+    const row  = nodeEditRow.value
+    const form = nodeEditForm.value
+
+    if (form.newMac !== row.mac) {
+      await axios.patch('/api/pxe/nodes-json/update-mac', null, {
+        params: { old_mac: row.mac, new_mac: form.newMac }
+      })
+    }
+
+    const effectiveMac = form.newMac
+    await axios.patch('/api/pxe/nodes-json/update-node', {
+      mac:       effectiveMac,
+      ctrl_nic:  form.ctrl_nic  || null,
+      dpdk_nics: form.dpdkPairs.map(p => p.nic).filter(Boolean).join(' ') || null,
+      dpdk_ips:  form.dpdkPairs.map(p => p.ip ).filter(Boolean).join(' ') || null,
+      rdma_nics: form.rdmaPairs.map(p => p.nic).filter(Boolean).join(' ') || null,
+      rdma_ips:  form.rdmaPairs.map(p => p.ip ).filter(Boolean).join(' ') || null,
     })
-    ElMessage.success('MAC 已更新')
-    macEditVisible.value = false
+
+    ElMessage.success('节点配置已更新')
+    nodeEditVisible.value = false
     await loadNodeList()
   } catch (e) {
-    ElMessage.error('更新失败: ' + (e.response?.data?.detail || e.message))
+    ElMessage.error('保存失败: ' + (e.response?.data?.detail || e.message))
   } finally {
-    savingMac.value = false
+    savingNode.value = false
   }
 }
 
@@ -738,7 +882,6 @@ async function resetToTemplate() {
   } catch { return }
   try {
     const res = await axios.get('/api/pxe/nodes-json')
-    // 删除用户现有 key，写入默认模板
     await axios.post('/api/pxe/nodes-json', res.data)
     ElMessage.success('已重置为模板 MAC')
     await loadNodeList()
@@ -862,6 +1005,36 @@ async function queryNodeEnv() {
     ElMessage.error(e.response?.data?.detail || '未找到该 MAC 的配置')
   } finally {
     queryingEnv.value = false
+  }
+}
+
+// ── Tab4: 自定义脚本 ──────────────────────────────────────────────────────────
+const scriptTargets     = ref([])
+const customScript      = ref('')
+const scriptSshUser     = ref('root')
+const scriptSshPassword = ref('')
+const runningScript     = ref(false)
+const scriptResult      = ref([])
+
+async function runCustomScript() {
+  if (!scriptTargets.value.length) { ElMessage.warning('请选择目标节点'); return }
+  if (!customScript.value.trim()) { ElMessage.warning('请输入脚本内容'); return }
+  runningScript.value = true
+  scriptResult.value = []
+  try {
+    const res = await axios.post('/api/pxe/run-script', {
+      macs:         scriptTargets.value,
+      script:       customScript.value,
+      ssh_user:     scriptSshUser.value || 'root',
+      ssh_password: scriptSshPassword.value || null,
+    })
+    scriptResult.value = res.data
+    const ok = res.data.filter(r => r.status === 'success').length
+    ElMessage.success(`脚本执行完成：${ok}/${res.data.length} 个节点成功`)
+  } catch (e) {
+    ElMessage.error('执行失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    runningScript.value = false
   }
 }
 
@@ -1032,4 +1205,62 @@ onMounted(async () => {
 }
 
 .stage-text { margin-left: 8px; font-size: 12px; color: #aaa; }
+
+/* ── 暗色 Tab ── */
+.dark-tabs.el-tabs--border-card {
+  border: 1px solid #1e293b;
+  background: transparent;
+}
+.dark-tabs :deep(.el-tabs__header) {
+  background: #0f172a;
+  border-bottom: 1px solid #1e293b;
+}
+.dark-tabs :deep(.el-tabs__item) {
+  color: #64748b;
+  border-right: 1px solid #1e293b !important;
+  transition: color 0.2s, background 0.2s;
+}
+.dark-tabs :deep(.el-tabs__item:hover) {
+  color: #93c5fd;
+}
+.dark-tabs :deep(.el-tabs__item.is-active) {
+  color: #3b82f6;
+  background: #1e293b;
+  border-bottom-color: #1e293b !important;
+}
+.dark-tabs :deep(.el-tabs__content) {
+  background: transparent;
+  padding: 16px 0 0;
+}
+
+/* ── NIC 编辑行 ── */
+.nic-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-left: 110px;
+}
+.nic-idx {
+  color: #64748b;
+  font-size: 12px;
+  width: 16px;
+  text-align: right;
+}
+.nic-add-row {
+  padding-left: 110px;
+  margin-bottom: 6px;
+}
+
+/* ── 脚本输出 ── */
+.script-output {
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+  font-family: 'Consolas', monospace;
+  color: #94a3b8;
+  margin: 0;
+  max-height: 80px;
+  overflow-y: auto;
+}
 </style>
