@@ -4,6 +4,7 @@ PXE 部署 API v2 - 鲲鹏集群 22 节点三平面部署
 
 import asyncio
 import functools
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
@@ -37,6 +38,8 @@ def _ssh_run(host: str, user: str, password: Optional[str], port: int, script: s
 from models.node import Node, PXEConfig, get_db
 from pydantic import BaseModel
 from services.pxe_service import pxe_service_v2
+from services.redfish_service import RedfishClient
+from config import ISO_DIR
 
 
 router = APIRouter()
@@ -423,20 +426,95 @@ class ScriptRunRequest(BaseModel):
 
 
 _WAVE_ROLES: dict = {
+    0: ["pxe_host"],            # 第零批：PXE Host 自身（Redfish 虚拟介质）
     1: ["subswath", "gstorage"],
     2: ["master"],
     3: ["slave"],
 }
 
 
+def _wave0_redfish_deploy(db: Session) -> dict:
+    """
+    第零批：用 Redfish 虚拟介质给 PXE Host 装机。
+    Windows 管理站把本地 ISO 通过 HTTP 暴露给 BMC，BMC 拉 ISO 引导。
+    """
+    cfg = pxe_service_v2.read_pxe_host_config()
+    bmc_ip   = cfg.get("bmc_ip", "")
+    iso_file = cfg.get("iso_filename", "")
+    if not bmc_ip:
+        raise HTTPException(status_code=400, detail="未配置 PXE Host BMC IP")
+    if not iso_file:
+        raise HTTPException(status_code=400, detail="未选择 ISO 文件")
+
+    iso_path = Path(ISO_DIR) / iso_file
+    if not iso_path.exists():
+        raise HTTPException(status_code=404, detail=f"ISO 不存在: {iso_file}")
+
+    iso_host = cfg.get("iso_http_host") or ""
+    iso_port = int(cfg.get("iso_http_port") or 8000)
+    if not iso_host:
+        raise HTTPException(status_code=400, detail="未配置 ISO HTTP 主机地址（iso_http_host）")
+    image_url = f"http://{iso_host}:{iso_port}/iso/{iso_file}"
+
+    client = RedfishClient(
+        bmc_ip=bmc_ip,
+        username=cfg.get("bmc_user", "Administrator"),
+        password=cfg.get("bmc_password", ""),
+        manager_id=cfg.get("redfish_manager_id", "1"),
+        system_id=cfg.get("redfish_system_id", "1"),
+        virtual_media_id=cfg.get("redfish_virtual_media_id", "CD"),
+    )
+    redfish_result = client.deploy_iso(image_url)
+
+    # 写入/更新 DB 节点记录用于状态监控页展示
+    hostname = cfg.get("hostname") or "host-server"
+    ctrl_ip = cfg.get("ctrl_ip", "")
+    db_status = "deploying" if redfish_result["ok"] else "error"
+
+    existing = db.query(Node).filter(Node.hostname == hostname).first()
+    if existing:
+        existing.bmc_ip    = bmc_ip
+        existing.mgmt_ip   = bmc_ip
+        existing.ctrl_ip   = ctrl_ip
+        existing.node_type = "pxe_host"
+        existing.status    = db_status
+    else:
+        existing = Node(
+            hostname=hostname,
+            node_type="pxe_host",
+            role="pxe_host",
+            ctrl_ip=ctrl_ip,
+            mgmt_ip=bmc_ip,
+            bmc_ip=bmc_ip,
+            status=db_status,
+        )
+        db.add(existing)
+        db.flush()
+    db.commit()
+
+    return {
+        "wave": 0,
+        "roles": ["pxe_host"],
+        "triggered": 1 if redfish_result["ok"] else 0,
+        "nodes": [hostname],
+        "iso": iso_file,
+        "image_url": image_url,
+        "redfish": redfish_result,
+    }
+
+
 @router.post("/wave-deploy/{wave}")
 def trigger_wave_deploy(wave: int, db: Session = Depends(get_db)):
     """
-    触发分批部署：将 nodes.json 中对应角色节点同步到 DB 并置 deploying 状态，
-    使状态监控页面可立即显示 IP 和进展。
+    触发分批部署：
+      wave=0 → PXE Host 自身（Redfish 虚拟介质 + ISO 引导）
+      wave=1/2/3 → 从 nodes.json 读取对应角色，置 DB 状态为 deploying
     """
     if wave not in _WAVE_ROLES:
-        raise HTTPException(status_code=400, detail="wave 必须为 1 / 2 / 3")
+        raise HTTPException(status_code=400, detail="wave 必须为 0 / 1 / 2 / 3")
+
+    if wave == 0:
+        return _wave0_redfish_deploy(db)
 
     roles = _WAVE_ROLES[wave]
     nodes_json = pxe_service_v2.read_nodes_json()
@@ -489,6 +567,53 @@ def trigger_wave_deploy(wave: int, db: Session = Depends(get_db)):
         "roles": roles,
         "triggered": len(deployed_nodes),
         "nodes": [n.hostname for n in deployed_nodes],
+    }
+
+
+# ── PXE Host 自身配置 + ISO 管理 ─────────────────────────────────────────────
+
+class PxeHostConfig(BaseModel):
+    hostname: Optional[str] = None
+    bmc_ip: Optional[str] = None
+    bmc_user: Optional[str] = None
+    bmc_password: Optional[str] = None
+    redfish_manager_id: Optional[str] = None
+    redfish_system_id: Optional[str] = None
+    redfish_virtual_media_id: Optional[str] = None
+    ctrl_ip: Optional[str] = None
+    iso_filename: Optional[str] = None
+    iso_http_host: Optional[str] = None
+    iso_http_port: Optional[int] = None
+
+
+@router.get("/pxe-host/config")
+def get_pxe_host_config():
+    """读取 PXE Host 部署配置（BMC / Redfish / ISO）"""
+    cfg = pxe_service_v2.read_pxe_host_config()
+    # 不向前端回传明文密码（只显示是否已设置）
+    safe = {**cfg, "bmc_password": "********" if cfg.get("bmc_password") else ""}
+    return safe
+
+
+@router.put("/pxe-host/config")
+def update_pxe_host_config(req: PxeHostConfig):
+    """更新 PXE Host 部署配置（仅写入提交的字段）"""
+    cfg = pxe_service_v2.read_pxe_host_config()
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    # 占位密码视为不变
+    if updates.get("bmc_password") == "********":
+        updates.pop("bmc_password")
+    cfg.update(updates)
+    pxe_service_v2.write_pxe_host_config(cfg)
+    return {"message": "PXE Host 配置已更新", "updated": list(updates.keys())}
+
+
+@router.get("/pxe-host/iso-list")
+def list_pxe_host_iso():
+    """列出 Windows 安装目录下 iso/ 子目录中的 ISO 文件"""
+    return {
+        "iso_dir": str(ISO_DIR),
+        "files": pxe_service_v2.list_iso_files(ISO_DIR),
     }
 
 

@@ -8,15 +8,67 @@ from typing import Dict, List, Optional
 from pathlib import Path
 
 from config import PXE_DATA_DIR as _PXE_DATA_DIR
-DEFAULT_NODES_JSON_PATH = Path(_PXE_DATA_DIR) / "nodes.json"
+DEFAULT_NODES_JSON_PATH    = Path(_PXE_DATA_DIR) / "nodes.json"
+DEFAULT_PXE_HOST_JSON_PATH = Path(_PXE_DATA_DIR) / "pxe_host.json"
+
+
+_DEFAULT_PXE_HOST_CONFIG: Dict = {
+    "hostname":             "host-server",
+    "bmc_ip":               "172.16.0.10",
+    "bmc_user":             "Administrator",
+    "bmc_password":         "Admin@9000",
+    "redfish_manager_id":   "1",
+    "redfish_system_id":    "1",
+    "redfish_virtual_media_id": "CD",
+    "ctrl_ip":              "172.16.3.10",
+    "iso_filename":         "",
+    "iso_http_host":        "172.16.0.5",
+    "iso_http_port":        8000,
+    "note":                 "Windows 管理站通过 BMC 虚拟介质挂载 ISO 触发自部署",
+}
 
 
 class PXEServiceV2:
     """PXE 部署配置服务 v2"""
 
-    def __init__(self, nodes_json_path: str = None):
+    def __init__(self, nodes_json_path: str = None, pxe_host_json_path: str = None):
         self.nodes_json_path = Path(nodes_json_path) if nodes_json_path else DEFAULT_NODES_JSON_PATH
         self.nodes_json_path.parent.mkdir(parents=True, exist_ok=True)
+        self.pxe_host_json_path = (
+            Path(pxe_host_json_path) if pxe_host_json_path else DEFAULT_PXE_HOST_JSON_PATH
+        )
+
+    # ── PXE Host 自身配置（独立文件，避免污染 nodes.json）──────────────────────
+
+    def read_pxe_host_config(self) -> Dict:
+        if not self.pxe_host_json_path.exists():
+            self.write_pxe_host_config(_DEFAULT_PXE_HOST_CONFIG.copy())
+            return _DEFAULT_PXE_HOST_CONFIG.copy()
+        with open(self.pxe_host_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # 补全任何缺失字段（向前兼容旧配置）
+        merged = _DEFAULT_PXE_HOST_CONFIG.copy()
+        merged.update(data)
+        return merged
+
+    def write_pxe_host_config(self, data: Dict) -> None:
+        self.pxe_host_json_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.pxe_host_json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def list_iso_files(self, iso_dir: Path) -> List[Dict]:
+        """列出 ISO 目录下所有 .iso 文件及大小。"""
+        iso_dir = Path(iso_dir)
+        if not iso_dir.exists():
+            return []
+        result = []
+        for p in sorted(iso_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() == ".iso":
+                result.append({
+                    "filename": p.name,
+                    "size_mb":  round(p.stat().st_size / (1024 * 1024), 1),
+                })
+        return result
 
     # ── nodes.json 管理 ──────────────────────────────────────────────────────
 

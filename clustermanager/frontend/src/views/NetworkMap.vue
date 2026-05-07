@@ -169,7 +169,8 @@ const NODE_TYPE_LABEL = {
   subswath:     'SubSwath NFS Server',
   gstorage:     'GStorage NFS Server',
   sensor:       '传感器阵列',
-  mgmt_station: '管理站',
+  mgmt_station: '管理站 (Windows)',
+  pxe_host:     'PXE Host (DHCP/TFTP/HTTP)',
   switch:       '交换机',
 }
 const STATUS_TAG = {
@@ -194,11 +195,11 @@ const STAT_PLANES = [
 ]
 
 // 节点尺寸
-const NODE_R = { master: 32, slave: 22, subswath: 22, gstorage: 22, sensor: 24, mgmt_station: 26, switch: 0 }
+const NODE_R = { master: 32, slave: 22, subswath: 22, gstorage: 22, sensor: 24, mgmt_station: 26, pxe_host: 26, switch: 0 }
 const SW_W = 96, SW_H = 38
 
 // 节点内部图标文字
-const NODE_ICON = { master: 'M', slave: 'S', subswath: 'N', gstorage: 'G', sensor: 'D', mgmt_station: '⚙' }
+const NODE_ICON = { master: 'M', slave: 'S', subswath: 'N', gstorage: 'G', sensor: 'D', mgmt_station: '⚙', pxe_host: 'P' }
 
 // ─── 响应式状态 ───────────────────────────────────────────────
 const topoRef    = ref(null)
@@ -239,6 +240,7 @@ const computePositions = (nodes, W, H) => {
   const storages = nodes.filter(n => n.type === 'subswath' || n.type === 'gstorage')
   const sensors  = nodes.filter(n => n.type === 'sensor')
   const mgmtSt   = nodes.find(n => n.id === 'mgmt-station')
+  const pxeHost  = nodes.find(n => n.id === 'pxe-host')
   const swMgmt   = nodes.find(n => n.id === 'sw-mgmt')
   const swCtrl   = nodes.find(n => n.id === 'sw-ctrl')
   const swData   = nodes.find(n => n.id === 'sw-data-100g')
@@ -250,9 +252,10 @@ const computePositions = (nodes, W, H) => {
   const y3 = H * 0.64   // 数据交换层（100G 交换机）
   const y4 = H * 0.84   // 数据处理层（Slave + SubSwath + GStorage）
 
-  // 第 0 层
-  if (mgmtSt) pos['mgmt-station'] = { x: padX + usableW * 0.12, y: y0 }
-  if (swMgmt) pos['sw-mgmt']      = { x: padX + usableW * 0.55, y: y0 }
+  // 第 0 层（管理层）：管理站(Windows) — 管理交换机 — PXE Host
+  if (mgmtSt)  pos['mgmt-station'] = { x: padX + usableW * 0.10, y: y0 }
+  if (swMgmt)  pos['sw-mgmt']      = { x: padX + usableW * 0.45, y: y0 }
+  if (pxeHost) pos['pxe-host']     = { x: padX + usableW * 0.78, y: y0 }
 
   // 第 1 层
   sensors.forEach((s, i) => {
@@ -511,6 +514,7 @@ const renderTopology = () => {
         master: '#1e3a5f', slave: '#1e293b',
         subswath: '#1a2e20', gstorage: '#2e1e1a',
         sensor: '#2d1b4e', mgmt_station: '#1a2e1a',
+        pxe_host: '#3a1f1f',
       }
       ng.append('circle')
         .attr('r', r)

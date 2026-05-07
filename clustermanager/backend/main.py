@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 
-from config import STATIC_DIR
+from config import STATIC_DIR, ISO_DIR
 from models.node import init_db, engine
 from models.seed import seed_demo_data
 from api import nodes, pxe, ipmi, network, alerts, diagnose, patrol
@@ -84,6 +84,12 @@ app.include_router(patrol.router,  prefix="/api/patrol",  tags=["巡检管理"])
 @app.get("/api/health")
 async def health_check():
     return {"status": "healthy", "version": "2.0.0"}
+
+
+# ── PXE Host 部署 ISO 目录（BMC 通过 HTTP 拉取）─────────────────────────────
+# 必须在 SPA catch-all 之前挂载，否则会被 index.html 兜底拦截
+if os.path.isdir(ISO_DIR):
+    app.mount("/iso", StaticFiles(directory=ISO_DIR), name="iso")
 
 
 # ── 前端静态文件（打包后 static/ 目录存在则启用）────────────────────────────

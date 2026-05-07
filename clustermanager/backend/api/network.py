@@ -164,14 +164,25 @@ def get_topology_graph(db: Session = Depends(get_db)):
 
     has_data = bool(masters or slaves or sensors or storages)
 
+    # ── 管理站（Windows）+ PXE Host 配置读取 ─────────────────
+    pxe_host_cfg = pxe_service_v2.read_pxe_host_config()
+    pxe_host_db = next(
+        (n for n in nodes if n.node_type == "pxe_host" or n.hostname == pxe_host_cfg.get("hostname")),
+        None,
+    )
+    pxe_host_status = pxe_host_db.status if pxe_host_db else "offline"
+
     # ── 基础设施虚拟节点 ──────────────────────────────────────
     graph_nodes = [
         {
             "id": "mgmt-station",
-            "name": "管理站",
+            "name": "管理站 (Windows)",
             "type": "mgmt_station",
             "status": "online",
-            "planes": {"management": {"ip": "172.16.0.1", "status": "online"}}
+            "planes": {
+                "management": {"ip": pxe_host_cfg.get("iso_http_host") or "—", "status": "online"},
+                "control":    {"ip": "—", "status": "online"},
+            },
         },
         {
             "id": "sw-mgmt",
@@ -193,6 +204,23 @@ def get_topology_graph(db: Session = Depends(get_db)):
             "type": "switch",
             "switch_plane": "data_front",
             "status": "online" if has_data else "offline"
+        },
+        {
+            "id": "pxe-host",
+            "name": pxe_host_cfg.get("hostname") or "host-server",
+            "type": "pxe_host",
+            "status": pxe_host_status,
+            "planes": {
+                "management": {
+                    "ip":     pxe_host_cfg.get("bmc_ip") or "—",
+                    "bmc_ip": pxe_host_cfg.get("bmc_ip") or "—",
+                    "status": "online" if pxe_host_cfg.get("bmc_ip") else "offline",
+                },
+                "control": {
+                    "ip":     pxe_host_cfg.get("ctrl_ip") or "—",
+                    "status": pxe_host_status,
+                },
+            },
         },
     ]
 
@@ -223,13 +251,24 @@ def get_topology_graph(db: Session = Depends(get_db)):
 
     graph_links = []
 
-    # ── 管理面：管理站 → 管理交换机 → 所有节点 ───────────────
+    # ── 管理面：管理站 → 管理交换机 → 所有节点（含 PXE Host）─
     graph_links.append({
         "source": "mgmt-station", "target": "sw-mgmt",
-        "plane": "management", "protocol": "IPMI",
+        "plane": "management", "protocol": "IPMI/Redfish",
         "bandwidth": "GE", "status": "normal", "latency": 0.5, "packet_loss": 0
     })
+    # 管理站 → PXE Host BMC（Redfish 部署通道）
+    if pxe_host_cfg.get("bmc_ip"):
+        graph_links.append({
+            "source": "sw-mgmt", "target": "pxe-host",
+            "plane": "management", "protocol": "Redfish",
+            "bandwidth": "GE",
+            "status": "normal" if pxe_host_status != "offline" else "down",
+            "latency": 1.0, "packet_loss": 0
+        })
     for node in nodes:
+        if node.node_type == "pxe_host":
+            continue   # PXE Host 已在上面单独连过
         if node.bmc_ip or node.mgmt_ip:
             graph_links.append({
                 "source": "sw-mgmt", "target": str(node.id),
@@ -239,8 +278,23 @@ def get_topology_graph(db: Session = Depends(get_db)):
                 "latency": 1.0, "packet_loss": 0
             })
 
-    # ── 控制面：控制交换机 → 所有节点 ────────────────────────
+    # ── 控制面：管理站 + PXE Host + 节点 ↔ 控制交换机 ────────
+    graph_links.append({
+        "source": "mgmt-station", "target": "sw-ctrl",
+        "plane": "control", "protocol": "TCP",
+        "bandwidth": "10GE", "status": "normal", "latency": 0.5, "packet_loss": 0
+    })
+    if pxe_host_cfg.get("ctrl_ip"):
+        graph_links.append({
+            "source": "pxe-host", "target": "sw-ctrl",
+            "plane": "control", "protocol": "DHCP/TFTP/HTTP",
+            "bandwidth": "10GE",
+            "status": "normal" if pxe_host_status != "offline" else "down",
+            "latency": 0.5, "packet_loss": 0
+        })
     for node in nodes:
+        if node.node_type == "pxe_host":
+            continue
         if node.ctrl_ip:
             graph_links.append({
                 "source": "sw-ctrl", "target": str(node.id),
