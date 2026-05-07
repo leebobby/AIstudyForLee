@@ -97,6 +97,9 @@ class DeployStatus(BaseModel):
     message: str
     started_at: Optional[datetime]
     completed_at: Optional[datetime] = None
+    bmc_ip: Optional[str] = None
+    ctrl_ip: Optional[str] = None
+    data_ip: Optional[str] = None
 
 
 # ── 既有端点（保持兼容）──────────────────────────────────────────────────────
@@ -117,6 +120,18 @@ def create_pxe_config(config: PXEConfigCreate, db: Session = Depends(get_db)):
     return db_config
 
 
+_STAGE_LABELS = {
+    "deploying":   "等待 PXE 引导...",
+    "installing":  "正在安装操作系统...",
+    "configuring": "正在配置节点...",
+}
+_STAGE_PROGRESS = {
+    "deploying":   20,
+    "installing":  55,
+    "configuring": 80,
+}
+
+
 @router.get("/status")
 def get_deploy_status(db: Session = Depends(get_db)):
     """获取正在部署的节点状态"""
@@ -128,10 +143,13 @@ def get_deploy_status(db: Session = Depends(get_db)):
             node_id=node.id,
             hostname=node.hostname,
             status=node.status,
-            stage=node.status,
-            progress=50,
-            message="正在部署...",
+            stage=_STAGE_LABELS.get(node.status, node.status),
+            progress=_STAGE_PROGRESS.get(node.status, 50),
+            message="正在部署，等待 firstboot 回报...",
             started_at=node.created_at,
+            bmc_ip=node.bmc_ip,
+            ctrl_ip=node.ctrl_ip,
+            data_ip=node.data_ip,
         )
         for node in nodes
     ]
@@ -402,6 +420,76 @@ class ScriptRunRequest(BaseModel):
     ssh_user: str = "root"
     ssh_password: Optional[str] = None
     ssh_port: int = 22
+
+
+_WAVE_ROLES: dict = {
+    1: ["subswath", "gstorage"],
+    2: ["master"],
+    3: ["slave"],
+}
+
+
+@router.post("/wave-deploy/{wave}")
+def trigger_wave_deploy(wave: int, db: Session = Depends(get_db)):
+    """
+    触发分批部署：将 nodes.json 中对应角色节点同步到 DB 并置 deploying 状态，
+    使状态监控页面可立即显示 IP 和进展。
+    """
+    if wave not in _WAVE_ROLES:
+        raise HTTPException(status_code=400, detail="wave 必须为 1 / 2 / 3")
+
+    roles = _WAVE_ROLES[wave]
+    nodes_json = pxe_service_v2.read_nodes_json()
+    deployed_nodes = []
+
+    for mac, node in nodes_json.items():
+        if mac.startswith("_"):
+            continue
+        role = node.get("role", "slave")
+        if role not in roles:
+            continue
+        hostname = node.get("hostname_new", "")
+        if not hostname:
+            continue
+
+        ctrl_ip    = node.get("ctrl_ip", "").split("/")[0]
+        bmc_ip     = node.get("bmc_ip", "")
+        rdma_ips   = node.get("rdma_ips", "")
+        first_rdma = rdma_ips.split()[0].split("/")[0] if rdma_ips else ""
+
+        existing = db.query(Node).filter(Node.hostname == hostname).first()
+        if existing:
+            existing.ctrl_ip   = ctrl_ip
+            existing.ctrl_mac  = mac
+            existing.mgmt_ip   = bmc_ip
+            existing.bmc_ip    = bmc_ip
+            existing.data_ip   = first_rdma
+            existing.node_type = role
+            existing.status    = "deploying"
+            deployed_nodes.append(existing)
+        else:
+            new_node = Node(
+                hostname=hostname,
+                node_type=role,
+                role=role,
+                ctrl_ip=ctrl_ip,
+                ctrl_mac=mac,
+                mgmt_ip=bmc_ip,
+                bmc_ip=bmc_ip,
+                data_ip=first_rdma,
+                status="deploying",
+            )
+            db.add(new_node)
+            db.flush()
+            deployed_nodes.append(new_node)
+
+    db.commit()
+    return {
+        "wave": wave,
+        "roles": roles,
+        "triggered": len(deployed_nodes),
+        "nodes": [n.hostname for n in deployed_nodes],
+    }
 
 
 @router.post("/run-script")

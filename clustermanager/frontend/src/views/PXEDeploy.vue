@@ -678,19 +678,33 @@
           </template>
           <el-empty v-if="deployTasks.length === 0" description="暂无进行中的部署任务" :image-size="60" />
           <el-table v-else :data="deployTasks" stripe size="small">
-            <el-table-column prop="hostname" label="主机名"  width="140" />
-            <el-table-column prop="status"   label="状态"   width="120">
+            <el-table-column prop="hostname" label="主机名"   width="130" />
+            <el-table-column prop="bmc_ip"   label="BMC IP"  width="130">
+              <template #default="{ row }">
+                <span class="ip-text">{{ row.bmc_ip || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="ctrl_ip"  label="控制面 IP" width="130">
+              <template #default="{ row }">
+                <span class="ip-text">{{ row.ctrl_ip || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="data_ip"  label="数据面 IP" width="130">
+              <template #default="{ row }">
+                <span class="ip-text">{{ row.data_ip || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="status"   label="状态"   width="110">
               <template #default="{ row }">
                 <el-tag :type="statusTagType(row.status)" size="small">{{ row.status }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="stage"    label="阶段"   width="300">
+            <el-table-column prop="stage"    label="阶段进展" min-width="240">
               <template #default="{ row }">
                 <el-progress :percentage="row.progress" :status="row.status === 'completed' ? 'success' : ''" />
                 <span class="stage-text">{{ row.stage }}</span>
               </template>
             </el-table-column>
-            <el-table-column prop="message"  label="消息" />
           </el-table>
         </el-card>
       </el-tab-pane>
@@ -963,7 +977,7 @@ async function triggerWaveDeploy(wave) {
   const roleStr = WAVE_ROLES[wave].join(' + ')
   try {
     await ElMessageBox.confirm(
-      `将触发第 ${wave} 批（${roleStr}）共 ${nodes.length} 个节点的 ipmitool PXE 引导并上电，确认继续？`,
+      `将触发第 ${wave} 批（${roleStr}）共 ${nodes.length} 个节点的 PXE 引导并将其置为部署中状态，确认继续？`,
       `确认触发第 ${wave} 批部署`,
       { type: 'warning' }
     )
@@ -971,25 +985,12 @@ async function triggerWaveDeploy(wave) {
 
   deployingWave.value = wave
   try {
-    // 调用 IPMI batch-deploy 接口，每个节点设置 PXE 启动
-    const reqs = nodes.map(n => ({
-      node_id: 0,
-      node_type: n.role,
-      mgmt_ip: n.bmc_ip,
-      ctrl_ip: n.ctrl_ip,
-      data_ip: n.rdma_ips?.split(' ')[0] || '',
-      hostname: n.hostname,
-    }))
-    await axios.post('/api/ipmi/batch-pxe-boot', {
-      bmc_ips: nodes.map(n => n.bmc_ip),
-    }).catch(() => {
-      // IPMI 接口可能未实现，降级为仅提示
-    })
-    ElMessage.success(`第 ${wave} 批（${nodes.length} 个节点）部署已触发`)
+    const res = await axios.post(`/api/pxe/wave-deploy/${wave}`)
+    ElMessage.success(`第 ${wave} 批（${res.data.triggered} 个节点）部署已触发`)
     activeTab.value = 'status'
     await refreshDeployStatus()
   } catch (e) {
-    ElMessage.error('触发失败: ' + e.message)
+    ElMessage.error('触发失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     deployingWave.value = 0
   }
@@ -1206,6 +1207,7 @@ onMounted(async () => {
 }
 
 .stage-text { margin-left: 8px; font-size: 12px; color: #aaa; }
+.ip-text    { font-family: monospace; font-size: 12px; color: #93c5fd; }
 
 /* ── 暗色 Tab ── */
 .dark-tabs.el-tabs--border-card {

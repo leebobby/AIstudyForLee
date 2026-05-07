@@ -252,6 +252,15 @@ cluster-manager-linux-arm64.tar.gz
 
 ## 变更记录
 
+### 2026-05-08 — 分批部署状态监控修复（IP 地址 + 进展显示）
+
+| 文件 | 变更 |
+|------|------|
+| `backend/api/pxe.py` | 新增 `POST /wave-deploy/{wave}` 端点：从 nodes.json 读取对应角色节点，同步到 DB 并置 `status=deploying`，使状态监控立即可见 |
+| `backend/api/pxe.py` | `DeployStatus` 模型增加 `bmc_ip`、`ctrl_ip`、`data_ip` 字段；`GET /status` 返回 IP 信息及有意义的阶段文本（等待 PXE 引导/安装/配置）和对应进度百分比 |
+| `frontend/src/views/PXEDeploy.vue` | `triggerWaveDeploy()` 改为调用 `/api/pxe/wave-deploy/{wave}`，不再依赖静默失败的 IPMI 接口 |
+| `frontend/src/views/PXEDeploy.vue` | 状态监控表格新增 BMC IP / 控制面 IP / 数据面 IP 三列，蓝色等宽字体显示 |
+
 ### 2026-05-08 — 配色修复 + 组网图 100G 交换机拓扑 + 多接口并行链路
 
 **涉及文件**：
