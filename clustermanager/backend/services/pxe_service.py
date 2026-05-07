@@ -32,15 +32,21 @@ class PXEServiceV2:
         with open(self.nodes_json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def _default_nodes_json(self) -> Dict:
-        """22 节点默认模板（MAC 为占位符，需替换为实际硬件 MAC）"""
+    def _default_nodes_json(
+        self,
+        master_count: int = 6,
+        slave_count: int = 12,
+        subswath_count: int = 2,
+        gstorage_count: int = 1,
+    ) -> Dict:
+        """节点配置模板（MAC 为占位符，需替换为实际硬件 MAC）"""
         nodes: Dict = {
-            "_comment": "鲲鹏集群 nodes.json v2 - 22节点，基于新组网图",
+            "_comment": "鲲鹏集群 nodes.json v2 - 基于新组网图",
             "_hardware": "全角色系统盘统一为 2×960G 硬件 RAID1 -> /dev/sda",
         }
 
-        # Master ×6: BMC 172.16.0.11-16 | ctrl 172.16.3.11-16
-        for i in range(1, 7):
+        # Master: BMC 172.16.0.11+ | ctrl 172.16.3.11+
+        for i in range(1, master_count + 1):
             mac = f"aa:bb:cc:11:00:{i:02x}"
             nodes[mac] = {
                 "hostname_new": f"master-{i:02d}",
@@ -59,13 +65,13 @@ class PXEServiceV2:
                 "bmc_ip": f"172.16.0.{10 + i}",
             }
 
-        # Slave ×12: BMC 172.16.0.51-62 | ctrl 172.16.3.51-62
+        # Slave: BMC 172.16.0.51+ | ctrl 172.16.3.51+
         nfs_mounts = (
             "100.1.1.170:/data/export:/mnt/swath1,"
             "100.1.1.171:/data/export:/mnt/swath2,"
             "100.1.2.172:/data/export:/mnt/global"
         )
-        for i in range(1, 13):
+        for i in range(1, slave_count + 1):
             mac = f"aa:bb:cc:22:00:{i:02x}"
             nodes[mac] = {
                 "hostname_new": f"slave-{i:02d}",
@@ -83,8 +89,8 @@ class PXEServiceV2:
                 "bmc_ip": f"172.16.0.{50 + i}",
             }
 
-        # SubSwath ×2: BMC 172.16.0.170-171 | ctrl 172.16.3.170-171
-        for i in range(1, 3):
+        # SubSwath: BMC 172.16.0.170+ | ctrl 172.16.3.170+
+        for i in range(1, subswath_count + 1):
             mac = f"aa:bb:cc:33:00:{i:02x}"
             nodes[mac] = {
                 "hostname_new": f"subswath-{i:02d}",
@@ -105,24 +111,26 @@ class PXEServiceV2:
                 "bmc_ip": f"172.16.0.{169 + i}",
             }
 
-        # GStorage ×1: BMC 172.16.0.172 | ctrl 172.16.3.172
-        nodes["aa:bb:cc:44:00:01"] = {
-            "hostname_new": "gstorage-01",
-            "role": "gstorage",
-            "ctrl_nic": "eno1",
-            "ctrl_ip": "172.16.3.172/24",
-            "ctrl_gw": "172.16.3.1",
-            "rdma_nics": "eno2",
-            "rdma_ips": "100.1.2.172/24",
-            "nfs_export_ip": "100.1.2.172",
-            "nfs_exports": "/data/export",
-            "hugepages_1g": "0",
-            "system_disk": "/dev/sda",
-            "data_disks": "/dev/sdb",
-            "dirs": "/data/export",
-            "extra_pkgs": "nfs-utils",
-            "bmc_ip": "172.16.0.172",
-        }
+        # GStorage: BMC 172.16.0.172+ | ctrl 172.16.3.172+
+        for i in range(1, gstorage_count + 1):
+            mac = f"aa:bb:cc:44:00:{i:02x}"
+            nodes[mac] = {
+                "hostname_new": f"gstorage-{i:02d}",
+                "role": "gstorage",
+                "ctrl_nic": "eno1",
+                "ctrl_ip": f"172.16.3.{171 + i}/24",
+                "ctrl_gw": "172.16.3.1",
+                "rdma_nics": "eno2",
+                "rdma_ips": f"100.1.2.{171 + i}/24",
+                "nfs_export_ip": f"100.1.2.{171 + i}",
+                "nfs_exports": "/data/export",
+                "hugepages_1g": "0",
+                "system_disk": "/dev/sda",
+                "data_disks": "/dev/sdb",
+                "dirs": "/data/export",
+                "extra_pkgs": "nfs-utils",
+                "bmc_ip": f"172.16.0.{171 + i}",
+            }
 
         return nodes
 

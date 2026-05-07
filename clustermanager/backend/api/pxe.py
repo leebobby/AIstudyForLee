@@ -308,6 +308,69 @@ def get_pxe_boot_script():
     return pxe_service_v2.generate_pxe_boot_script()
 
 
+class RegenerateRequest(BaseModel):
+    master_count: int = 6
+    slave_count: int = 12
+    subswath_count: int = 2
+    gstorage_count: int = 1
+
+
+@router.post("/nodes-json/regenerate")
+def regenerate_nodes_json(req: RegenerateRequest):
+    """按指定节点数量重新生成 nodes.json 模板（MAC 为占位符）"""
+    data = pxe_service_v2._default_nodes_json(
+        master_count=req.master_count,
+        slave_count=req.slave_count,
+        subswath_count=req.subswath_count,
+        gstorage_count=req.gstorage_count,
+    )
+    pxe_service_v2.write_nodes_json(data)
+    node_count = sum(1 for k in data if not k.startswith("_"))
+    return {"message": "nodes.json 已重新生成", "node_count": node_count}
+
+
+@router.post("/nodes-json/sync-to-db")
+def sync_nodes_json_to_db(db: Session = Depends(get_db)):
+    """将 nodes.json 同步到 DB 节点表，使组网图数据与规划保持一致"""
+    nodes_json = pxe_service_v2.read_nodes_json()
+    synced = 0
+    for mac, node in nodes_json.items():
+        if mac.startswith("_"):
+            continue
+        hostname = node.get("hostname_new", "")
+        if not hostname:
+            continue
+        role = node.get("role", "slave")
+        ctrl_ip = node.get("ctrl_ip", "").split("/")[0]
+        bmc_ip = node.get("bmc_ip", "")
+        rdma_ips = node.get("rdma_ips", "")
+        first_rdma_ip = rdma_ips.split()[0].split("/")[0] if rdma_ips else ""
+
+        existing = db.query(Node).filter(Node.hostname == hostname).first()
+        if existing:
+            existing.ctrl_ip  = ctrl_ip
+            existing.ctrl_mac = mac
+            existing.mgmt_ip  = bmc_ip
+            existing.bmc_ip   = bmc_ip
+            existing.data_ip  = first_rdma_ip
+            existing.node_type = role
+        else:
+            db.add(Node(
+                hostname=hostname,
+                node_type=role,
+                role=role,
+                ctrl_ip=ctrl_ip,
+                ctrl_mac=mac,
+                mgmt_ip=bmc_ip,
+                bmc_ip=bmc_ip,
+                data_ip=first_rdma_ip,
+                status="offline",
+            ))
+        synced += 1
+    db.commit()
+    return {"message": f"已同步 {synced} 个节点到数据库"}
+
+
 class NodeFieldsUpdate(BaseModel):
     """更新 nodes.json 中指定节点的 NIC / IP 字段"""
     mac: str

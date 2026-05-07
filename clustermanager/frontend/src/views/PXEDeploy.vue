@@ -788,8 +788,8 @@ async function generatePlan() {
 async function applyPlanToNodesJson() {
   try {
     await ElMessageBox.confirm(
-      '将用规划结果（含模板 MAC）覆盖当前 nodes.json，实际部署前需手动替换 MAC 地址。确认继续？',
-      '确认覆盖',
+      `将按当前规划数量（Master×${planForm.value.master_count} / Slave×${planForm.value.slave_count} / SubSwath×${planForm.value.subswath_count} / GStorage×${planForm.value.gstorage_count}）重新生成 nodes.json 模板，并同步到组网图。确认继续？`,
+      '确认应用规划',
       { type: 'warning' }
     )
   } catch {
@@ -797,10 +797,11 @@ async function applyPlanToNodesJson() {
   }
   applyingPlan.value = true
   try {
-    // 先获取现有 nodes.json 模板（已有完整字段），再刷新节点列表
-    const res = await axios.get('/api/pxe/nodes-json')
-    await axios.post('/api/pxe/nodes-json', res.data)
-    ElMessage.success('nodes.json 已重置为规划模板')
+    // 1. 按规划数量重新生成 nodes.json
+    await axios.post('/api/pxe/nodes-json/regenerate', planForm.value)
+    // 2. 同步到 DB，更新组网图
+    await axios.post('/api/pxe/nodes-json/sync-to-db')
+    ElMessage.success('nodes.json 已重新生成，组网图已同步')
     await loadNodeList()
     activeTab.value = 'nodes'
   } catch (e) {
@@ -1231,6 +1232,46 @@ onMounted(async () => {
 .dark-tabs :deep(.el-tabs__content) {
   background: transparent;
   padding: 16px 0 0;
+}
+
+/* ── 全局暗色表格（覆盖 Element Plus 默认白色） ── */
+.pxe-deploy :deep(.el-table) {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: #0d1b2e;
+  --el-table-row-hover-bg-color: #1e3a5f;
+  --el-table-current-row-bg-color: #1e3a5f;
+  --el-table-border-color: #1e293b;
+  --el-table-text-color: #cbd5e1;
+  --el-table-header-text-color: #64748b;
+  --el-fill-color-light: rgba(255, 255, 255, 0.025);
+  background-color: transparent;
+}
+.pxe-deploy :deep(.el-table th.el-table__cell) {
+  background-color: #0d1b2e !important;
+  color: #64748b;
+  border-bottom-color: #1e293b;
+}
+.pxe-deploy :deep(.el-table td.el-table__cell) {
+  background-color: transparent !important;
+  border-bottom-color: #1e293b;
+  color: #cbd5e1;
+}
+.pxe-deploy :deep(.el-table tr) {
+  background-color: transparent !important;
+}
+.pxe-deploy :deep(.el-table__body tr:hover > td.el-table__cell) {
+  background-color: #1e3a5f !important;
+}
+.pxe-deploy :deep(.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell) {
+  background-color: rgba(255, 255, 255, 0.025) !important;
+}
+.pxe-deploy :deep(.el-table__inner-wrapper::before),
+.pxe-deploy :deep(.el-table__border-left-patch) {
+  background-color: #1e293b;
+}
+.pxe-deploy :deep(.el-table__empty-block) {
+  background-color: transparent;
 }
 
 /* ── NIC 编辑行 ── */

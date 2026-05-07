@@ -252,6 +252,30 @@ cluster-manager-linux-arm64.tar.gz
 
 ## 变更记录
 
+### 2026-05-08 — PXE 表格暗色主题修复 + IP规划同步节点配置/组网图
+
+**涉及文件**：
+- `frontend/src/views/PXEDeploy.vue`
+- `backend/api/pxe.py`
+- `backend/services/pxe_service.py`
+
+**变更详情**：
+
+| # | 变更点 | 说明 |
+|---|--------|------|
+| 1 | **表格暗色主题** | 用 `.pxe-deploy :deep(.el-table)` 覆盖 Element Plus 所有白色默认值：表头 `#0d1b2e`，行透明，hover `#1e3a5f`，斑马纹 `rgba(255,255,255,0.025)`，使用 CSS 变量 + `!important` 双保险 |
+| 2 | **IP规划同步** | 修复 `applyPlanToNodesJson()` —— 原实现只是将 nodes.json 读出再写回（无变化）；现改为调用 `regenerate`（按规划数量重新生成）+ `sync-to-db`（同步到 DB），节点配置和组网图同步更新 |
+| 3 | **`_default_nodes_json()` 参数化** | 新增 `master_count / slave_count / subswath_count / gstorage_count` 参数，支持任意数量节点的模板生成 |
+
+**新增后端接口**：
+
+| 接口 | 说明 |
+|------|------|
+| `POST /api/pxe/nodes-json/regenerate` | 按指定节点数量重新生成 nodes.json 模板 |
+| `POST /api/pxe/nodes-json/sync-to-db` | 将 nodes.json 同步到 DB 节点表，使组网图同步更新 |
+
+---
+
 ### 2026-05-08 — PXE 页面优化：暗色 Tab / NIC 编辑 / 自定义脚本 / 组网图 BMC 跳转
 
 **涉及文件**：
