@@ -169,6 +169,7 @@ const NODE_TYPE_LABEL = {
   subswath:     'SubSwath NFS Server',
   gstorage:     'GStorage NFS Server',
   sensor:       '传感器阵列',
+  acquisition:  'Acquisition 采集节点',
   mgmt_station: '管理站 (Windows)',
   pxe_host:     'PXE Host (DHCP/TFTP/HTTP)',
   switch:       '交换机',
@@ -195,11 +196,11 @@ const STAT_PLANES = [
 ]
 
 // 节点尺寸
-const NODE_R = { master: 32, slave: 22, subswath: 22, gstorage: 22, sensor: 24, mgmt_station: 26, pxe_host: 26, switch: 0 }
+const NODE_R = { master: 32, slave: 22, subswath: 22, gstorage: 22, sensor: 24, acquisition: 22, mgmt_station: 26, pxe_host: 26, switch: 0 }
 const SW_W = 96, SW_H = 38
 
 // 节点内部图标文字
-const NODE_ICON = { master: 'M', slave: 'S', subswath: 'N', gstorage: 'G', sensor: 'D', mgmt_station: '⚙', pxe_host: 'P' }
+const NODE_ICON = { master: 'M', slave: 'S', subswath: 'N', gstorage: 'G', sensor: 'D', acquisition: 'A', mgmt_station: '⚙', pxe_host: 'P' }
 
 // ─── 响应式状态 ───────────────────────────────────────────────
 const topoRef    = ref(null)
@@ -275,8 +276,9 @@ const computePositions = (nodes, W, H) => {
   // 第 3 层：100G 数据交换机（居中）
   if (swData) pos['sw-data-100g'] = { x: padX + usableW * 0.5, y: y3 }
 
-  // 第 4 层：Slaves + Storages 均匀分布
-  const bottomNodes = [...slaves, ...storages]
+  // 第 4 层：Slaves + Storages + Acquisitions 均匀分布
+  const acqs = nodes.filter(n => n.type === 'acquisition')
+  const bottomNodes = [...slaves, ...storages, ...acqs]
   bottomNodes.forEach((n, i) => {
     pos[n.id] = {
       x: padX + (i + 0.5) * (usableW / Math.max(bottomNodes.length, 1)),
@@ -513,8 +515,8 @@ const renderTopology = () => {
       const nodeFills = {
         master: '#1e3a5f', slave: '#1e293b',
         subswath: '#1a2e20', gstorage: '#2e1e1a',
-        sensor: '#2d1b4e', mgmt_station: '#1a2e1a',
-        pxe_host: '#3a1f1f',
+        sensor: '#2d1b4e', acquisition: '#0e2a2e',
+        mgmt_station: '#1a2e1a', pxe_host: '#3a1f1f',
       }
       ng.append('circle')
         .attr('r', r)

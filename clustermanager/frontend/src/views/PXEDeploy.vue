@@ -24,18 +24,21 @@
           </el-alert>
 
           <!-- 节点数量 -->
-          <el-form :model="planForm" inline label-width="110px">
+          <el-form :model="planForm" inline label-width="120px">
             <el-form-item label="Master 数量">
-              <el-input-number v-model="planForm.master_count" :min="1" :max="10" />
+              <el-input-number v-model="planForm.master_count" :min="0" :max="10" />
             </el-form-item>
             <el-form-item label="Slave 数量">
-              <el-input-number v-model="planForm.slave_count" :min="1" :max="50" />
+              <el-input-number v-model="planForm.slave_count" :min="0" :max="50" />
             </el-form-item>
             <el-form-item label="SubSwath 数量">
-              <el-input-number v-model="planForm.subswath_count" :min="1" :max="8" />
+              <el-input-number v-model="planForm.subswath_count" :min="0" :max="8" />
             </el-form-item>
             <el-form-item label="GStorage 数量">
-              <el-input-number v-model="planForm.gstorage_count" :min="1" :max="4" />
+              <el-input-number v-model="planForm.gstorage_count" :min="0" :max="4" />
+            </el-form-item>
+            <el-form-item label="Acquisition 数量">
+              <el-input-number v-model="planForm.acquisition_count" :min="0" :max="20" />
             </el-form-item>
             <el-form-item>
               <el-button type="primary" @click="generatePlan" :loading="planning">
@@ -74,29 +77,29 @@
           </el-card>
 
           <!-- Master -->
-          <el-card shadow="never" style="margin-bottom:12px">
+          <el-card v-if="ipPlanResult.plan.masters.length" shadow="never" style="margin-bottom:12px">
             <template #header>
               <span class="role-tag role-master">Master ×{{ ipPlanResult.plan.masters.length }}</span>
             </template>
             <el-table :data="ipPlanResult.plan.masters" size="small" stripe>
-              <el-table-column prop="hostname"  label="主机名"     width="120" />
+              <el-table-column prop="hostname"  label="主机名"     width="130" />
               <el-table-column prop="bmc_ip"    label="BMC IP"    width="130" />
               <el-table-column prop="ctrl_ip"   label="控制面"     width="130" />
               <el-table-column prop="dpdk1_ip"  label="DPDK-1"    width="120" />
               <el-table-column prop="dpdk2_ip"  label="DPDK-2"    width="120" />
               <el-table-column prop="rdma1_ip"  label="RDMA-1"    width="120" />
               <el-table-column prop="rdma2_ip"  label="RDMA-2"    width="120" />
-              <el-table-column prop="hugepages_1g" label="大页(×1G)" width="90" />
+              <el-table-column prop="hugepages_1g" label="大页(×1G)" width="80" />
             </el-table>
           </el-card>
 
           <!-- Slave -->
-          <el-card shadow="never" style="margin-bottom:12px">
+          <el-card v-if="ipPlanResult.plan.slaves.length" shadow="never" style="margin-bottom:12px">
             <template #header>
               <span class="role-tag role-slave">Slave ×{{ ipPlanResult.plan.slaves.length }}</span>
             </template>
             <el-table :data="ipPlanResult.plan.slaves" size="small" stripe>
-              <el-table-column prop="hostname" label="主机名"   width="120" />
+              <el-table-column prop="hostname" label="主机名"   width="130" />
               <el-table-column prop="bmc_ip"   label="BMC IP"  width="140" />
               <el-table-column prop="ctrl_ip"  label="控制面"  width="140" />
               <el-table-column prop="rdma1_ip" label="RDMA-1"  width="140" />
@@ -105,7 +108,7 @@
           </el-card>
 
           <!-- SubSwath -->
-          <el-card shadow="never" style="margin-bottom:12px">
+          <el-card v-if="ipPlanResult.plan.subswaths.length" shadow="never" style="margin-bottom:12px">
             <template #header>
               <span class="role-tag role-subswath">SubSwath ×{{ ipPlanResult.plan.subswaths.length }}</span>
             </template>
@@ -121,7 +124,7 @@
           </el-card>
 
           <!-- GStorage -->
-          <el-card shadow="never">
+          <el-card v-if="ipPlanResult.plan.gstorages.length" shadow="never" style="margin-bottom:12px">
             <template #header>
               <span class="role-tag role-gstorage">GStorage ×{{ ipPlanResult.plan.gstorages.length }}</span>
             </template>
@@ -132,6 +135,21 @@
               <el-table-column prop="rdma2_ip"   label="RDMA-2"  width="140" />
               <el-table-column prop="data_disks" label="数据盘"  width="140" />
               <el-table-column prop="data_raid"  label="RAID 方案" />
+            </el-table>
+          </el-card>
+
+          <!-- Acquisition -->
+          <el-card v-if="ipPlanResult.plan.acquisitions.length" shadow="never" style="margin-bottom:12px">
+            <template #header>
+              <span class="role-tag role-acquisition">Acquisition ×{{ ipPlanResult.plan.acquisitions.length }}</span>
+            </template>
+            <el-table :data="ipPlanResult.plan.acquisitions" size="small" stripe>
+              <el-table-column prop="hostname"  label="主机名"    width="150" />
+              <el-table-column prop="bmc_ip"    label="BMC IP"   width="140" />
+              <el-table-column prop="ctrl_ip"   label="控制面"    width="140" />
+              <el-table-column prop="dpdk1_ip"  label="DPDK-1"   width="140" />
+              <el-table-column prop="rdma1_ip"  label="RDMA-1"   width="140" />
+              <el-table-column prop="nics"      label="网口分配" />
             </el-table>
           </el-card>
         </template>
@@ -224,6 +242,28 @@
             </el-descriptions-item>
           </el-descriptions>
 
+          <!-- 角色对应网卡规划提示 -->
+          <el-alert type="info" :closable="false" style="margin-bottom:12px">
+            <template #title>
+              <span v-if="nodeEditRow.role === 'master'">
+                Master — DPDK×2（eno2/eno3，200.1.1/200.1.2）+ RDMA×2（eno4/eno5，100.1.1/100.1.2）
+              </span>
+              <span v-else-if="nodeEditRow.role === 'acquisition'">
+                Acquisition — DPDK×1（eno2，200.1.1）+ RDMA×1（eno3，100.1.1）
+              </span>
+              <span v-else-if="nodeEditRow.role === 'slave'">
+                Slave — RDMA×1（eno2，100.1.1）
+              </span>
+              <span v-else-if="nodeEditRow.role === 'subswath'">
+                SubSwath — RDMA×2（eno2/eno3，100.1.1/100.1.2）
+              </span>
+              <span v-else-if="nodeEditRow.role === 'gstorage'">
+                GStorage — RDMA×1（eno2，100.1.2）
+              </span>
+              <span v-else>{{ nodeEditRow.role }} — 按实际网卡配置填写</span>
+            </template>
+          </el-alert>
+
           <el-form label-width="110px" size="small">
             <el-divider content-position="left">MAC 地址</el-divider>
             <el-form-item label="当前 MAC">
@@ -238,7 +278,8 @@
               <el-input v-model="nodeEditForm.ctrl_nic" placeholder="如 eno1 / enp129s0f0" style="width:200px" />
             </el-form-item>
 
-            <template v-if="nodeEditRow.role === 'master'">
+            <!-- DPDK：master + acquisition 均有 DPDK -->
+            <template v-if="['master', 'acquisition'].includes(nodeEditRow.role)">
               <el-divider content-position="left">DPDK 网卡（100GE 数据面前段）</el-divider>
               <div
                 v-for="(pair, idx) in nodeEditForm.dpdkPairs"
@@ -260,25 +301,28 @@
               </div>
             </template>
 
-            <el-divider content-position="left">RDMA 网卡（100GE 数据面后段）</el-divider>
-            <div
-              v-for="(pair, idx) in nodeEditForm.rdmaPairs"
-              :key="'rdma'+idx"
-              class="nic-row"
-            >
-              <span class="nic-idx">{{ idx + 1 }}</span>
-              <el-input v-model="pair.nic" placeholder="网卡名 如 enp130s0f0" style="width:175px" />
-              <el-input v-model="pair.ip" placeholder="IP/掩码 如 100.1.1.11/24" style="width:195px" />
-              <el-button size="small" :disabled="nodeEditForm.rdmaPairs.length <= 1"
-                @click="nodeEditForm.rdmaPairs.splice(idx, 1)">
-                <el-icon><Minus /></el-icon>
-              </el-button>
-            </div>
-            <div class="nic-add-row">
-              <el-button size="small" @click="nodeEditForm.rdmaPairs.push({ nic: '', ip: '' })">
-                <el-icon><Plus /></el-icon> 添加 RDMA 网卡
-              </el-button>
-            </div>
+            <!-- RDMA：除 pxe_host 以外所有角色均可能有 RDMA -->
+            <template v-if="!['pxe_host'].includes(nodeEditRow.role)">
+              <el-divider content-position="left">RDMA 网卡（100GE 数据面后段）</el-divider>
+              <div
+                v-for="(pair, idx) in nodeEditForm.rdmaPairs"
+                :key="'rdma'+idx"
+                class="nic-row"
+              >
+                <span class="nic-idx">{{ idx + 1 }}</span>
+                <el-input v-model="pair.nic" placeholder="网卡名 如 enp130s0f0" style="width:175px" />
+                <el-input v-model="pair.ip" placeholder="IP/掩码 如 100.1.1.11/24" style="width:195px" />
+                <el-button size="small" :disabled="nodeEditForm.rdmaPairs.length <= 1"
+                  @click="nodeEditForm.rdmaPairs.splice(idx, 1)">
+                  <el-icon><Minus /></el-icon>
+                </el-button>
+              </div>
+              <div class="nic-add-row">
+                <el-button size="small" @click="nodeEditForm.rdmaPairs.push({ nic: '', ip: '' })">
+                  <el-icon><Plus /></el-icon> 添加 RDMA 网卡
+                </el-button>
+              </div>
+            </template>
           </el-form>
 
           <template #footer>
@@ -507,8 +551,8 @@
         </el-alert>
 
         <el-row :gutter="16">
-          <!-- 第一批: SubSwath + GStorage -->
-          <el-col :span="8">
+          <!-- 第一批: SubSwath + GStorage（有节点才显示） -->
+          <el-col :span="8" v-if="waveNodes(1).length > 0">
             <el-card shadow="never" class="wave-card">
               <template #header>
                 <div class="wave-header">
@@ -517,11 +561,7 @@
                 </div>
               </template>
               <div class="wave-nodes">
-                <div
-                  v-for="node in waveNodes(1)"
-                  :key="node.mac"
-                  class="wave-node-item"
-                >
+                <div v-for="node in waveNodes(1)" :key="node.mac" class="wave-node-item">
                   <el-tag :type="roleTagType(node.role)" size="small">{{ node.role }}</el-tag>
                   <span class="node-name">{{ node.hostname }}</span>
                   <span class="node-bmc">{{ node.bmc_ip }}</span>
@@ -537,19 +577,15 @@
                 <code>showmount -e 100.1.1.171</code><br>
                 <code>showmount -e 100.1.2.172</code>
               </div>
-              <el-button
-                type="warning"
-                style="margin-top:12px;width:100%"
-                @click="triggerWaveDeploy(1)"
-                :loading="deployingWave === 1"
-              >
+              <el-button type="warning" style="margin-top:12px;width:100%"
+                @click="triggerWaveDeploy(1)" :loading="deployingWave === 1">
                 触发第一批部署
               </el-button>
             </el-card>
           </el-col>
 
-          <!-- 第二批: Master -->
-          <el-col :span="8">
+          <!-- 第二批: Master（有节点才显示） -->
+          <el-col :span="8" v-if="waveNodes(2).length > 0">
             <el-card shadow="never" class="wave-card">
               <template #header>
                 <div class="wave-header">
@@ -558,11 +594,7 @@
                 </div>
               </template>
               <div class="wave-nodes">
-                <div
-                  v-for="node in waveNodes(2)"
-                  :key="node.mac"
-                  class="wave-node-item"
-                >
+                <div v-for="node in waveNodes(2)" :key="node.mac" class="wave-node-item">
                   <el-tag type="success" size="small">master</el-tag>
                   <span class="node-name">{{ node.hostname }}</span>
                   <span class="node-bmc">{{ node.bmc_ip }}</span>
@@ -577,33 +609,25 @@
                 <code>grep HugePages_Total /proc/meminfo</code>
                 <div style="color:#6c6c6c;font-size:12px">期望 100 个 1G 大页</div>
               </div>
-              <el-button
-                type="success"
-                style="margin-top:12px;width:100%"
-                @click="triggerWaveDeploy(2)"
-                :loading="deployingWave === 2"
-              >
+              <el-button type="success" style="margin-top:12px;width:100%"
+                @click="triggerWaveDeploy(2)" :loading="deployingWave === 2">
                 触发第二批部署
               </el-button>
             </el-card>
           </el-col>
 
-          <!-- 第三批: Slave -->
-          <el-col :span="8">
+          <!-- 第三批: Slave + Acquisition（有节点才显示） -->
+          <el-col :span="8" v-if="waveNodes(3).length > 0">
             <el-card shadow="never" class="wave-card">
               <template #header>
                 <div class="wave-header">
                   <el-tag type="primary" size="large">第三批</el-tag>
-                  <span>Slave（RDMA 计算 + NFS 客户端）</span>
+                  <span>Slave / Acquisition（RDMA + NFS 客户端）</span>
                 </div>
               </template>
               <div class="wave-nodes">
-                <div
-                  v-for="node in waveNodes(3)"
-                  :key="node.mac"
-                  class="wave-node-item"
-                >
-                  <el-tag type="primary" size="small">slave</el-tag>
+                <div v-for="node in waveNodes(3)" :key="node.mac" class="wave-node-item">
+                  <el-tag :type="roleTagType(node.role)" size="small">{{ node.role }}</el-tag>
                   <span class="node-name">{{ node.hostname }}</span>
                   <span class="node-bmc">{{ node.bmc_ip }}</span>
                 </div>
@@ -613,18 +637,21 @@
               </div>
               <el-divider />
               <div class="wave-check">
-                <b>就绪验证：</b>
+                <b>就绪验证（Slave）：</b>
                 <code>df -h | grep -E "swath|global"</code>
+                <b style="display:block;margin-top:6px">就绪验证（Acquisition）：</b>
+                <code>ip addr show eno2 | grep 200.1.1</code>
               </div>
-              <el-button
-                type="primary"
-                style="margin-top:12px;width:100%"
-                @click="triggerWaveDeploy(3)"
-                :loading="deployingWave === 3"
-              >
+              <el-button type="primary" style="margin-top:12px;width:100%"
+                @click="triggerWaveDeploy(3)" :loading="deployingWave === 3">
                 触发第三批部署
               </el-button>
             </el-card>
+          </el-col>
+
+          <!-- 全部为 0 时的空提示 -->
+          <el-col :span="24" v-if="waveNodes(1).length + waveNodes(2).length + waveNodes(3).length === 0">
+            <el-empty description="nodes.json 中暂无节点，请先在「节点配置」中检查或执行「应用到 nodes.json」" :image-size="60" />
           </el-col>
         </el-row>
 
@@ -936,7 +963,7 @@ import { Refresh, Search, Clock, Plus, Minus, Edit, CaretRight } from '@element-
 const activeTab = ref('planning')
 
 // ── Tab1: IP 规划 ─────────────────────────────────────────────────────────────
-const planForm = ref({ master_count: 6, slave_count: 12, subswath_count: 2, gstorage_count: 1 })
+const planForm = ref({ master_count: 6, slave_count: 12, subswath_count: 2, gstorage_count: 1, acquisition_count: 0 })
 const ipPlanResult = ref(null)
 const planning = ref(false)
 const applyingPlan = ref(false)
@@ -957,7 +984,7 @@ async function generatePlan() {
 async function applyPlanToNodesJson() {
   try {
     await ElMessageBox.confirm(
-      `将按当前规划数量（Master×${planForm.value.master_count} / Slave×${planForm.value.slave_count} / SubSwath×${planForm.value.subswath_count} / GStorage×${planForm.value.gstorage_count}）重新生成 nodes.json 模板，并同步到组网图。确认继续？`,
+      `将按当前规划数量（Master×${planForm.value.master_count} / Slave×${planForm.value.slave_count} / SubSwath×${planForm.value.subswath_count} / GStorage×${planForm.value.gstorage_count} / Acquisition×${planForm.value.acquisition_count}）重新生成 nodes.json 模板，并同步到组网图。确认继续？`,
       '确认应用规划',
       { type: 'warning' }
     )
@@ -1389,7 +1416,7 @@ async function checkBMCInfo(row) {
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 function roleTagType(role) {
-  return { master: 'success', slave: 'primary', subswath: 'warning', gstorage: 'danger', pxe_host: 'info' }[role] || 'info'
+  return { master: 'success', slave: 'primary', subswath: 'warning', gstorage: 'danger', acquisition: '', pxe_host: 'info' }[role] ?? 'info'
 }
 
 function statusTagType(status) {
@@ -1636,18 +1663,29 @@ onMounted(async () => {
   font-weight: 600;
 }
 
-/* ── el-descriptions 暗色 ── */
+/* ── el-descriptions 暗色（全局卡片内） ── */
 .pxe-deploy :deep(.el-descriptions__label) {
   background-color: #0d1b2e !important;
   color: #64748b !important;
 }
 .pxe-deploy :deep(.el-descriptions__content) {
-  background-color: transparent !important;
+  background-color: #0a1628 !important;
   color: #cbd5e1 !important;
 }
 .pxe-deploy :deep(.el-descriptions__cell) {
   border-color: #1e293b !important;
 }
+/* bootstrap-body 内的 el-descriptions 使用更深的底色与卡片匹配 */
+.pxe-deploy :deep(.bootstrap-body .el-descriptions__label),
+.pxe-deploy :deep(.bootstrap-body .el-descriptions__content) {
+  background-color: #060e1c !important;
+}
+.pxe-deploy :deep(.bootstrap-body .el-descriptions .el-descriptions__body) {
+  background-color: transparent !important;
+}
+
+/* ── acquisition 角色标签色 ── */
+.role-acquisition { color: #22d3ee; }
 
 /* ── 脚本输出 ── */
 .script-output {

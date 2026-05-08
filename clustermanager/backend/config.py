@@ -28,5 +28,6 @@ DATABASE_PATH = os.path.join(BASE_DIR, "cluster_manager.db")
 PXE_DATA_DIR  = os.path.join(BASE_DIR, "pxe_data")
 STATIC_DIR    = os.path.join(BASE_DIR, "static")
 # PXE Host 部署 ISO 存放目录（Windows 管理站本地，通过 HTTP 暴露给 BMC）
-ISO_DIR       = os.environ.get("CLUSTER_MANAGER_ISO_DIR") or os.path.join(BASE_DIR, "iso")
+ISO_DIR             = os.environ.get("CLUSTER_MANAGER_ISO_DIR") or os.path.join(BASE_DIR, "iso")
+SCRIPTS_BUNDLE_PATH = os.path.join(BASE_DIR, "scripts_bundle.json")
 os.makedirs(ISO_DIR, exist_ok=True)

@@ -259,6 +259,17 @@ cluster-manager-linux-arm64.tar.gz
 
 ## 变更记录
 
+### 2026-05-08 — 新增 Acquisition 角色 + 角色数量允许为 0 + Bootstrap 卡片底色修复
+
+| 文件 | 变更 |
+|------|------|
+| `backend/services/pxe_service.py` | `_default_nodes_json` / `generate_ip_plan` 新增 `acquisition_count` 参数（默认 0）；Acquisition 节点：BMC 172.16.0.100+，ctrl 172.16.3.100+，DPDK-1 200.1.1.100+，RDMA-1 100.1.1.100+，网卡 eno2(dpdk)/eno3(rdma) |
+| `backend/api/pxe.py` | `NetworkPlanRequest` / `RegenerateRequest` 加 `acquisition_count`；`_WAVE_ROLES[3]` 加入 `acquisition` |
+| `backend/api/network.py` | Acquisition 节点同时加入 DPDK（data_front）和 RDMA（data_back）链路组 |
+| `frontend/src/views/PXEDeploy.vue` | 数量输入框全部改为 `:min="0"`；加 Acquisition 数量输入和规划结果表；规划结果各角色表按 count > 0 条件显示；编辑对话框顶部加角色 NIC 规划提示；DPDK 段条件改为 `['master', 'acquisition'].includes(role)`；分批部署卡片加 `v-if="waveNodes(n).length > 0"` 条件渲染，全空时显示空提示；wave3 卡片标题改为"Slave / Acquisition" |
+| `frontend/src/views/NetworkMap.vue` | `NODE_TYPE_LABEL` / `NODE_R` / `NODE_ICON` / `nodeFills` 加 `acquisition`（图标 A，青黑色）；底层节点加入 acquisitions |
+| `frontend/src/views/PXEDeploy.vue` (CSS) | `el-descriptions` `content` 改为 `#0a1628`；Bootstrap 卡片内 `.bootstrap-body` 的 el-descriptions 使用更深底色 `#060e1c`；加 `.role-acquisition` 青色 |
+
 ### 2026-05-08 — Windows 管理站 + PXE Host 首次装机引导（Bootstrap，一次性）
 
 将 cluster-manager 由"运行在 PXE Host 上"改为"运行在独立 Windows 管理站上"。

@@ -2,6 +2,8 @@
 数据库初始化和模拟数据种子
 """
 
+import json
+import os
 from datetime import datetime
 from sqlalchemy.orm import Session
 
@@ -14,9 +16,33 @@ from .node import (
 
 
 def _seed_diag_scripts(db: Session):
-    """生成示例诊断脚本（业务诊断 + 硬件诊断）"""
+    """生成诊断脚本：优先从 scripts_bundle.json 加载，否则写入内置默认脚本"""
     if db.query(DiagScript).count() > 0:
         return
+
+    # ── 尝试从发布包加载 ─────────────────────────────────────────
+    try:
+        from config import SCRIPTS_BUNDLE_PATH
+        if os.path.exists(SCRIPTS_BUNDLE_PATH):
+            with open(SCRIPTS_BUNDLE_PATH, "r", encoding="utf-8") as f:
+                bundle = json.load(f)
+            items = bundle.get("scripts", [])
+            for item in items:
+                db.add(DiagScript(
+                    name=item.get("name", ""),
+                    description=item.get("description", ""),
+                    script_tab=item.get("script_tab", "hardware"),
+                    category=item.get("category", "通用诊断"),
+                    script_content=item.get("script_content", ""),
+                    target_node_type=item.get("target_node_type", "all"),
+                    timeout=item.get("timeout", 30),
+                    enabled=item.get("enabled", True),
+                ))
+            db.commit()
+            print(f"  - 从发布包加载 {len(items)} 个诊断脚本 ({SCRIPTS_BUNDLE_PATH})")
+            return
+    except Exception as e:
+        print(f"  - 发布包加载失败: {e}，使用内置默认脚本")
 
     scripts = [
         # ── 业务诊断 ──────────────────────────────────

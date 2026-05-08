@@ -75,11 +75,12 @@ class PXEConfigResponse(BaseModel):
 
 
 class NetworkPlanRequest(BaseModel):
-    """v2 IP 规划请求（固定六子网，仅需确认各角色数量）"""
+    """v2 IP 规划请求（固定六子网，仅需确认各角色数量，允许为 0）"""
     master_count: int = 6
     slave_count: int = 12
     subswath_count: int = 2
     gstorage_count: int = 1
+    acquisition_count: int = 0
 
 
 class DeployRequest(BaseModel):
@@ -252,6 +253,7 @@ def plan_network_ips(request: NetworkPlanRequest):
         slave_count=request.slave_count,
         subswath_count=request.subswath_count,
         gstorage_count=request.gstorage_count,
+        acquisition_count=request.acquisition_count,
     )
 
 
@@ -334,6 +336,7 @@ class RegenerateRequest(BaseModel):
     slave_count: int = 12
     subswath_count: int = 2
     gstorage_count: int = 1
+    acquisition_count: int = 0
 
 
 @router.post("/nodes-json/regenerate")
@@ -344,6 +347,7 @@ def regenerate_nodes_json(req: RegenerateRequest):
         slave_count=req.slave_count,
         subswath_count=req.subswath_count,
         gstorage_count=req.gstorage_count,
+        acquisition_count=req.acquisition_count,
     )
     pxe_service_v2.write_nodes_json(data)
     node_count = sum(1 for k in data if not k.startswith("_"))
@@ -428,7 +432,7 @@ class ScriptRunRequest(BaseModel):
 _WAVE_ROLES: dict = {
     1: ["subswath", "gstorage"],
     2: ["master"],
-    3: ["slave"],
+    3: ["slave", "acquisition"],
 }
 
 

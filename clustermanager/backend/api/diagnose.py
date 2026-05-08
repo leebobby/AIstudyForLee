@@ -2,7 +2,10 @@
 故障诊断 API
 """
 
+import json
+import os
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
@@ -11,6 +14,7 @@ import re
 from models.node import Node, Log, FaultPoint, DPDKStats, RDMAStats, DiagScript, get_db
 from pydantic import BaseModel
 from services.diag_service import run_ssh_command, collect_node_logs
+from config import SCRIPTS_BUNDLE_PATH
 
 
 router = APIRouter()
@@ -425,6 +429,107 @@ def delete_script(script_id: int, db: Session = Depends(get_db)):
     db.delete(script)
     db.commit()
     return {"message": "删除成功", "script_id": script_id}
+
+
+# ─────────────────────────────────────────────
+#  脚本配置 导出 / 导入 / 保存发布包
+# ─────────────────────────────────────────────
+
+def _scripts_to_list(scripts) -> list:
+    return [
+        {
+            "name": s.name,
+            "description": s.description or "",
+            "script_tab": s.script_tab,
+            "category": s.category,
+            "script_content": s.script_content,
+            "target_node_type": s.target_node_type,
+            "timeout": s.timeout,
+            "enabled": s.enabled,
+        }
+        for s in scripts
+    ]
+
+
+@router.get("/scripts/export")
+def export_scripts(db: Session = Depends(get_db)):
+    """导出全部诊断脚本为 JSON 文件（Content-Disposition: attachment）"""
+    scripts = db.query(DiagScript).order_by(
+        DiagScript.script_tab, DiagScript.category, DiagScript.name
+    ).all()
+    payload = {"version": "1.0", "scripts": _scripts_to_list(scripts)}
+    body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=scripts_bundle.json"},
+    )
+
+
+class ScriptImportRequest(BaseModel):
+    scripts: List[DiagScriptCreate]
+    mode: str = "merge"   # merge=upsert, replace=先清空再导入
+
+
+@router.post("/scripts/import")
+def import_scripts(req: ScriptImportRequest, db: Session = Depends(get_db)):
+    """批量导入脚本；merge 模式按 (script_tab+category+name) upsert，replace 先清空"""
+    if req.mode == "replace":
+        db.query(DiagScript).delete()
+        db.commit()
+
+    created = updated = 0
+    for item in req.scripts:
+        existing = db.query(DiagScript).filter(
+            DiagScript.script_tab == item.script_tab,
+            DiagScript.category == item.category,
+            DiagScript.name == item.name,
+        ).first()
+        if existing:
+            for k, v in item.model_dump().items():
+                setattr(existing, k, v)
+            existing.updated_at = datetime.utcnow()
+            updated += 1
+        else:
+            db.add(DiagScript(**item.model_dump()))
+            created += 1
+    db.commit()
+    return {"created": created, "updated": updated, "total": created + updated}
+
+
+@router.post("/scripts/save-bundle")
+def save_bundle(db: Session = Depends(get_db)):
+    """将当前数据库脚本快照写入 scripts_bundle.json（用于生成发布包）"""
+    scripts = db.query(DiagScript).order_by(
+        DiagScript.script_tab, DiagScript.category, DiagScript.name
+    ).all()
+    payload = {"version": "1.0", "scripts": _scripts_to_list(scripts)}
+    with open(SCRIPTS_BUNDLE_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return {
+        "message": f"已保存 {len(scripts)} 个脚本到发布配置",
+        "path": SCRIPTS_BUNDLE_PATH,
+        "count": len(scripts),
+    }
+
+
+@router.get("/scripts/bundle-info")
+def get_bundle_info():
+    """返回当前发布包信息（是否存在、脚本数量、修改时间）"""
+    if not os.path.exists(SCRIPTS_BUNDLE_PATH):
+        return {"exists": False, "count": 0, "mtime": None}
+    try:
+        with open(SCRIPTS_BUNDLE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        mtime = os.path.getmtime(SCRIPTS_BUNDLE_PATH)
+        from datetime import timezone
+        return {
+            "exists": True,
+            "count": len(data.get("scripts", [])),
+            "mtime": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"exists": True, "count": 0, "mtime": None, "error": str(e)}
 
 
 class ScriptRunRequest(BaseModel):

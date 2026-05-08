@@ -90,6 +90,7 @@ class PXEServiceV2:
         slave_count: int = 12,
         subswath_count: int = 2,
         gstorage_count: int = 1,
+        acquisition_count: int = 0,
     ) -> Dict:
         """节点配置模板（MAC 为占位符，需替换为实际硬件 MAC）"""
         nodes: Dict = {
@@ -182,6 +183,27 @@ class PXEServiceV2:
                 "dirs": "/data/export",
                 "extra_pkgs": "nfs-utils",
                 "bmc_ip": f"172.16.0.{171 + i}",
+            }
+
+        # Acquisition: BMC 172.16.0.100+ | ctrl 172.16.3.100+
+        # DPDK-1 200.1.1.100+ (接收传感器数据) | RDMA-1 100.1.1.100+ (上传处理结果)
+        for i in range(1, acquisition_count + 1):
+            mac = f"aa:bb:cc:55:00:{i:02x}"
+            nodes[mac] = {
+                "hostname_new": f"acquisition-{i:02d}",
+                "role": "acquisition",
+                "ctrl_nic": "eno1",
+                "ctrl_ip": f"172.16.3.{99 + i}/24",
+                "ctrl_gw": "172.16.3.1",
+                "dpdk_nics": "eno2",
+                "dpdk_ips": f"200.1.1.{99 + i}/24",
+                "rdma_nics": "eno3",
+                "rdma_ips": f"100.1.1.{99 + i}/24",
+                "hugepages_1g": "0",
+                "system_disk": "/dev/sda",
+                "data_disks": "",
+                "dirs": "/data",
+                "bmc_ip": f"172.16.0.{99 + i}",
             }
 
         return nodes
@@ -364,6 +386,7 @@ IBMC_PASS=your_password
         slave_count: int = 12,
         subswath_count: int = 2,
         gstorage_count: int = 1,
+        acquisition_count: int = 0,
     ) -> Dict:
         """
         v2 三平面 IP 规划（六子网固定网段）：
@@ -380,6 +403,7 @@ IBMC_PASS=your_password
             "slaves": [],
             "subswaths": [],
             "gstorages": [],
+            "acquisitions": [],
         }
 
         plan["pxe_host"].append({
@@ -443,7 +467,19 @@ IBMC_PASS=your_password
                 "nics": "eno1(ctrl) eno2(rdma2)",
             })
 
-        total = 1 + master_count + slave_count + subswath_count + gstorage_count
+        for i in range(1, acquisition_count + 1):
+            plan["acquisitions"].append({
+                "hostname": f"acquisition-{i:02d}",
+                "role": "acquisition",
+                "bmc_ip": f"172.16.0.{99 + i}",
+                "ctrl_ip": f"172.16.3.{99 + i}",
+                "dpdk1_ip": f"200.1.1.{99 + i}",
+                "rdma1_ip": f"100.1.1.{99 + i}",
+                "system_disk": "/dev/sda",
+                "nics": "eno1(ctrl) eno2(dpdk1) eno3(rdma1)",
+            })
+
+        total = 1 + master_count + slave_count + subswath_count + gstorage_count + acquisition_count
         return {
             "total_nodes": total,
             "subnets": {

@@ -1,5 +1,33 @@
 <template>
   <div class="diagnose-view">
+    <!-- ══ 脚本配置全局操作栏 ══ -->
+    <div class="scripts-mgmt-bar">
+      <span class="bar-label">脚本配置</span>
+      <div class="bar-actions">
+        <el-tooltip content="将当前所有脚本导出为 JSON 文件" placement="bottom">
+          <el-button size="small" @click="exportScripts">
+            <el-icon><Download /></el-icon>&nbsp;导出配置
+          </el-button>
+        </el-tooltip>
+        <el-tooltip content="从 JSON 文件导入脚本（按名称合并）" placement="bottom">
+          <el-button size="small" @click="importFileRef.click()">
+            <el-icon><Upload /></el-icon>&nbsp;导入配置
+          </el-button>
+        </el-tooltip>
+        <input ref="importFileRef" type="file" accept=".json" style="display:none" @change="onImportFile" />
+        <el-tooltip :content="bundleInfo.exists
+          ? `发布包: ${bundleInfo.count} 个脚本，更新于 ${formatDate(bundleInfo.mtime)}`
+          : '尚未生成发布配置'" placement="bottom">
+          <el-button size="small" type="primary" @click="saveBundle" :loading="savingBundle">
+            <el-icon><Box /></el-icon>&nbsp;保存为发布配置
+          </el-button>
+        </el-tooltip>
+        <el-tag v-if="bundleInfo.exists" size="small" type="success" class="bundle-tag">
+          已有发布包 ({{ bundleInfo.count }} 脚本)
+        </el-tag>
+      </div>
+    </div>
+
     <el-tabs v-model="activeTab" class="diag-tabs">
 
       <!-- ══════════════════════════════════════
@@ -538,6 +566,66 @@ async function queryLogs() {
 const levelColor = l => ({ error: 'danger', warning: 'warning', info: 'success', debug: 'info' }[l] || 'info')
 const formatDate = d => d ? new Date(d).toLocaleString() : ''
 
+// ─── 发布包管理 ───
+const importFileRef = ref(null)
+const savingBundle = ref(false)
+const bundleInfo = ref({ exists: false, count: 0, mtime: null })
+
+async function loadBundleInfo() {
+  try {
+    const res = await axios.get('/api/diagnose/scripts/bundle-info')
+    bundleInfo.value = res.data
+  } catch { /* ignore */ }
+}
+
+function exportScripts() {
+  window.open('/api/diagnose/scripts/export', '_blank')
+}
+
+async function onImportFile(event) {
+  const file = event.target.files[0]
+  if (!file) return
+  event.target.value = ''
+  let data
+  try {
+    data = JSON.parse(await file.text())
+  } catch {
+    ElMessage.error('文件格式错误，请选择合法的 JSON 文件')
+    return
+  }
+  const scripts = data.scripts || (Array.isArray(data) ? data : null)
+  if (!scripts) { ElMessage.error('JSON 中未找到 scripts 字段'); return }
+
+  try {
+    await ElMessageBox.confirm(
+      `将导入 ${scripts.length} 个脚本（同名脚本将被覆盖），继续？`,
+      '导入确认', { type: 'warning', confirmButtonText: '导入', cancelButtonText: '取消' }
+    )
+    const res = await axios.post('/api/diagnose/scripts/import', { scripts, mode: 'merge' })
+    ElMessage.success(`导入完成：新建 ${res.data.created}，更新 ${res.data.updated}`)
+    loadScripts()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(e.response?.data?.detail || '导入失败')
+  }
+}
+
+async function saveBundle() {
+  try {
+    await ElMessageBox.confirm(
+      '将当前数据库中的全部脚本保存为发布配置（scripts_bundle.json）。\n新环境首次启动时将自动加载此配置。',
+      '保存为发布配置', { type: 'info', confirmButtonText: '保存', cancelButtonText: '取消' }
+    )
+    savingBundle.value = true
+    const res = await axios.post('/api/diagnose/scripts/save-bundle')
+    ElMessage.success(res.data.message)
+    loadBundleInfo()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(e.response?.data?.detail || '保存失败')
+  } finally {
+    savingBundle.value = false
+  }
+}
+
 // ─── Init ───
 async function loadScripts() {
   try {
@@ -556,6 +644,7 @@ async function loadNodes() {
 onMounted(() => {
   loadScripts()
   loadNodes()
+  loadBundleInfo()
 })
 </script>
 
@@ -565,6 +654,32 @@ onMounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+/* ─── 发布配置操作栏 ─── */
+.scripts-mgmt-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: #0d1b2e;
+  border-bottom: 1px solid #0f3460;
+  flex-shrink: 0;
+}
+.bar-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #5577aa;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bundle-tag {
+  font-size: 11px;
 }
 
 /* ─── Tabs 深色风格 ─── */

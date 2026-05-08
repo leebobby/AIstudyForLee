@@ -139,10 +139,11 @@ def get_topology_graph(db: Session = Depends(get_db)):
     """获取组网图数据（用于前端D3.js渲染）"""
     nodes = db.query(Node).all()
 
-    masters  = [n for n in nodes if n.node_type == 'master']
-    slaves   = [n for n in nodes if n.node_type == 'slave']
-    sensors  = [n for n in nodes if n.node_type == 'sensor']
-    storages = [n for n in nodes if n.node_type in ('subswath', 'gstorage')]
+    masters      = [n for n in nodes if n.node_type == 'master']
+    slaves       = [n for n in nodes if n.node_type == 'slave']
+    sensors      = [n for n in nodes if n.node_type == 'sensor']
+    storages     = [n for n in nodes if n.node_type in ('subswath', 'gstorage')]
+    acquisitions = [n for n in nodes if n.node_type == 'acquisition']
 
     # ── 从 nodes.json 读取每节点的 NIC 清单 ──────────────────
     nic_map: dict = {}
@@ -162,7 +163,7 @@ def get_topology_graph(db: Session = Depends(get_db)):
     except Exception:
         pass
 
-    has_data = bool(masters or slaves or sensors or storages)
+    has_data = bool(masters or slaves or sensors or storages or acquisitions)
 
     # ── 管理站（Windows）+ PXE Host 配置读取 ─────────────────
     pxe_host_cfg = pxe_service_v2.read_pxe_host_config()
@@ -324,13 +325,13 @@ def get_topology_graph(db: Session = Depends(get_db)):
                 "latency": 0.1, "packet_loss": 0
             })
 
-    # ── 数据面前段（DPDK）：传感器 + Master ↔ 数据交换机 ─────
-    for node in sensors + masters:
+    # ── 数据面前段（DPDK）：传感器 + Master + Acquisition ↔ 数据交换机 ─
+    for node in sensors + masters + acquisitions:
         _data_links(node, "data_front", "DPDK",
                     node.data_status == "online")
 
-    # ── 数据面后段（RDMA）：Master + Slave + 存储 ↔ 数据交换机
-    for node in masters + slaves + storages:
+    # ── 数据面后段（RDMA）：Master + Slave + 存储 + Acquisition ↔ 数据交换机
+    for node in masters + slaves + storages + acquisitions:
         _data_links(node, "data_back", "RDMA",
                     node.data_status == "online")
 
