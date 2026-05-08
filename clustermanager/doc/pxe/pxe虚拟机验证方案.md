@@ -100,15 +100,25 @@ SubSwath-01 VM          :  3 GB  ← 验证 subswath role,NFS 服务端
 > ⚠️ 注意:如果 Windows 已开启 Hyper-V,VMware 可能无法正常运行。
 > 可以在 Windows 功能中关闭 Hyper-V,或者使用 VMware 的 WHP 模式(性能稍差但兼容)。
 
-### 1.2 下载 Rocky Linux 9 x86_64 ISO
+### 1.2 下载操作系统 ISO
 
+**方案A(原始文档):Rocky Linux 9 x86_64**
 ```
 下载地址:https://rockylinux.org/download
 选择: Rocky Linux 9 → x86_64 → Minimal ISO (~2.2GB)
 文件名: Rocky-9.x-x86_64-minimal.iso
 ```
 
+**方案B(实测可用):OpenEuler 22.03-LTS-SP3 x86_64**
+```
+下载地址:https://www.openeuler.org/zh/download/
+选择: openEuler 22.03 LTS SP3 → x86_64 → everything ISO
+```
+
 > ✅ 只需下载一次,PXE Host 的构建和所有节点 VM 的备用启动都用这个 ISO。
+>
+> ⚠️ **实测注意**:使用 OpenEuler ISO 时,后续 dnf repo 文件只需一个 `[local-openeuler]` 段,
+> `baseurl=file:///mnt/iso` 指向挂载根目录即可(OpenEuler ISO repodata 在根目录)。
 
 ### 1.3 准备工作目录
 
@@ -215,7 +225,7 @@ PXE-Host VM                                    被安装的节点 VM
 
 | VM 名称 | CPU | 内存 | 系统盘 | 数据盘 | 网口 1 (VMnet2) | 网口 2 (VMnet3) | 用途 |
 |---|---|---|---|---|---|---|---|
-| **PXE-Host** | 2 核 | 4 GB | 60 GB | 无 | eno1: 172.16.3.10 | eno2: 100.1.1.10 | DHCP/TFTP/HTTP/API |
+| **PXE-Host** | 2 核 | **≥4 GB** | **≥60 GB** | 无 | eno1: 172.16.3.10 | eno2: 100.1.1.10 | DHCP/TFTP/HTTP/API |
 | **Master-01** | 2 核 | 4 GB | 40 GB | 无 | eno1: DHCP→172.16.3.11 | eno2: 100.1.1.11 | 验证 master role |
 | **Slave-01** | 2 核 | 3 GB | 40 GB | 无 | eno1: DHCP→172.16.3.51 | eno2: 100.1.1.51 | 验证 slave role + NFS |
 | **SubSwath-01** | 2 核 | 3 GB | 40 GB | 20 GB×2 | eno1: DHCP→172.16.3.170 | eno2: 100.1.1.170 | 验证 NFS Server + 数据盘 |
@@ -336,16 +346,25 @@ dnf install -y \
     dhcp-server \
     tftp-server \
     httpd \
-    wget curl jq \
-    python3 python3-pip \
-    xz zstd \
+    wget curl \
+    python3 \
+    tar xz zstd \
     grub2-efi-x64 grub2-tools \
-    shim-x64
+    dracut dracut-network gdisk dosfstools
 
 # 挂载 ISO 作为本地源(加速后续 chroot 构建)
 mkdir -p /mnt/iso
 # 先把 ISO 传到 PXE-Host(从 Windows 用 scp 或共享目录)
 ```
+
+> ⚠️ **实测注意(OpenEuler)**:
+> - `jq` 不在 OpenEuler 本地 ISO 中，且实际脚本不需要，**去掉 jq**
+> - `tar` 在 OpenEuler minimal 安装中**未预装**，必须显式安装
+> - `shim-x64` 在 OpenEuler 中不存在，可跳过
+> - `python3-pip` 非必需，可跳过
+> - 网络未配置时无法访问外网，**建议挂载本地 ISO 作为 dnf 源**后再执行此步骤
+>
+> **安装完成后确认网络可用**(`ifconfig` 在 minimal 安装中不存在，用 `ip a` 替代):
 
 ### 4.3 传输 ISO 到 PXE-Host
 
@@ -519,36 +538,32 @@ curl -I http://172.16.3.10/images/base.tar.zst
 ### 6.2 TFTP 服务
 
 ```bash
-# 配置 TFTP
-cat > /etc/xinetd.d/tftp << 'EOF'
-service tftp
-{
-    socket_type     = dgram
-    protocol        = udp
-    wait            = yes
-    user            = root
-    server          = /usr/sbin/in.tftpd
-    server_args     = -s /var/lib/tftpboot -v
-    disable         = no
-    per_source      = 11
-    cps             = 100 2
-    flags           = IPv4
-}
-EOF
-
-# 或者直接用 systemd 版
 mkdir -p /var/lib/tftpboot
-systemctl enable --now tftp.socket || \
-    (dnf install -y tftp-server xinetd && systemctl enable --now xinetd)
+systemctl enable --now tftp.socket
 
-# 复制 UEFI PXE 文件(x86_64 UEFI 用 grubx64.efi)
-cp /boot/efi/EFI/rocky/grubx64.efi /var/lib/tftpboot/
-cp /boot/efi/EFI/rocky/shimx64.efi /var/lib/tftpboot/
+# 复制 UEFI PXE 文件
+# Rocky Linux 9:
+#   cp /boot/efi/EFI/rocky/grubx64.efi /var/lib/tftpboot/
+#   cp /boot/efi/EFI/rocky/shimx64.efi /var/lib/tftpboot/
+# OpenEuler 22.03 (EFI 目录为 openEuler,无 shim):
+ls /boot/efi/EFI/          # 确认目录名(rocky 或 openEuler)
+cp /boot/efi/EFI/openEuler/grubx64.efi /var/lib/tftpboot/
 
 # 复制内核和 initrd (从节点 ISO 提取)
-cp /mnt/iso/images/pxeboot/vmlinuz  /var/lib/tftpboot/vmlinuz-x64
+cp /mnt/iso/images/pxeboot/vmlinuz   /var/lib/tftpboot/vmlinuz-x64
 cp /mnt/iso/images/pxeboot/initrd.img /var/lib/tftpboot/initrd-x64-stock.img
+
+# ⚠️ 关键：必须给所有 tftpboot 文件设置可读权限
+# TFTP 服务以非 root 用户运行，文件权限不足会导致 "Permission denied"
+chmod 644 /var/lib/tftpboot/*
+
+# 验证 TFTP 可以传文件(curl 支持 tftp 协议)
+curl -v tftp://172.16.3.10/grubx64.efi -o /tmp/test.efi && echo "TFTP OK"
 ```
+
+> ⚠️ **实测问题**:从 `/boot/efi/EFI/openEuler/` 复制的 `grubx64.efi` 权限为 `700`(仅 root 可读),
+> TFTP 服务无法读取,导致节点 PXE 启动时一直返回 Boot Manager 界面。
+> **必须执行 `chmod 644 /var/lib/tftpboot/*`** 后 TFTP 才能正常传文件。
 
 ### 6.3 构建自定义部署 initrd
 
@@ -657,41 +672,30 @@ sleep 5
 reboot -f
 DEPLOY
 
-# 将 deploy.sh 注入到 initrd
-dnf install -y dracut dracut-network gdisk xfsprogs dosfstools wget --nogpgcheck
-
-mkdir -p /usr/lib/dracut/modules.d/99deploy
-
-cat > /usr/lib/dracut/modules.d/99deploy/module-setup.sh << 'EOF'
-#!/bin/bash
-check()   { return 0; }
-depends() { echo network; }
-install() {
-    inst_script "$moddir/deploy.sh" /deploy.sh
-    inst_hook initqueue/online 99 "$moddir/run-deploy.sh"
-    inst_multiple sgdisk mkfs.xfs mkfs.vfat partprobe wget \
-                  blkid lsblk curl grep awk sed cut tr
-}
-EOF
-
-cp /tmp/deploy.sh /usr/lib/dracut/modules.d/99deploy/deploy.sh
-
-cat > /usr/lib/dracut/modules.d/99deploy/run-deploy.sh << 'EOF'
+# 创建 run-deploy.sh 钩子触发脚本
+cat > /tmp/run-deploy.sh << 'EOF'
 #!/bin/bash
 [ -f /deploy-done ] && return 0
-echo "[deploy] Starting deployment..."
 bash /deploy.sh
-touch /deploy-done
+echo "done" > /deploy-done
 EOF
+chmod +x /tmp/run-deploy.sh
 
-chmod +x /usr/lib/dracut/modules.d/99deploy/*.sh
-
+# 使用 --include 方式构建 initrd（不依赖自定义模块）
+# ⚠️ 注意：OpenEuler 的 dracut 不支持自定义模块加载（dracut-initqueue 模块不存在，
+#    自定义 99deploy 模块报 "cannot be found or installed"），必须用 --include 方式注入
+# ⚠️ 钩子必须放在 initqueue/online（而非 pre-mount）：
+#    pre-mount 钩子有 systemd 超时，下载大文件时 dracut 会提前触发 switch-root 失败
 dracut --force --no-hostonly \
-    --add 'network base dracut-initqueue 99deploy' \
+    --add 'network base' \
+    --include /tmp/deploy.sh /deploy.sh \
+    --include /tmp/run-deploy.sh /lib/dracut/hooks/initqueue/online/99-deploy.sh \
+    --install 'sgdisk mkfs.xfs mkfs.vfat partprobe wget blkid lsblk curl grep awk sed cut tr tar zstd touch sleep reboot chroot mount umount mkdir cat bash' \
     --omit 'plymouth biosdevname' \
     --kver $(rpm -q kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' | tail -1) \
     /var/lib/tftpboot/initrd-x64-deploy.img
 
+chmod 644 /var/lib/tftpboot/initrd-x64-deploy.img
 echo "initrd 大小: $(du -sh /var/lib/tftpboot/initrd-x64-deploy.img)"
 ```
 
@@ -723,23 +727,25 @@ EOF
 # 先获取各节点 VM 的 MAC 地址(见 §9.1)
 # 这里先用占位符,后面替换
 
+# 配置 dhcpd 监听网口（根据实际网口名修改，VMware 下通常是 ens36 而非 ens160）
+cat > /etc/sysconfig/dhcpd << 'EOF'
+DHCPDARGS=ens36
+EOF
+
 cat > /etc/dhcp/dhcpd.conf << 'DHCPCONF'
 option domain-name-servers 172.16.3.10;
 default-lease-time 600;
 max-lease-time 7200;
 authoritative;
 
-# UEFI PXE(x86_64 用 grubx64.efi)
-class "x86-uefi" {
-    match if substring(option vendor-class-identifier, 0, 20)
-               = "PXEClient:Arch:00007";
-    filename "grubx64.efi";
-}
-
+# ⚠️ 实测注意：不要用 class 匹配 PXEClient:Arch:00007（32位EFI），
+# VMware x86_64 UEFI 发送的是 Arch:00009（64位EFI），class 不匹配则不下发 filename。
+# 直接在 subnet 层配置 filename 和 next-server，对所有客户端生效。
 subnet 172.16.3.0 netmask 255.255.255.0 {
     range 172.16.3.100 172.16.3.110;
     option routers 172.16.3.1;
     next-server 172.16.3.10;
+    filename "grubx64.efi";
 }
 
 # ── 节点 MAC 绑定(§9.1 获取真实 MAC 后替换)──
@@ -1192,16 +1198,21 @@ echo "镜像更新完成: $(du -sh /var/www/html/images/base.tar.zst)"
 在开始 PXE 部署之前,必须先获取每台节点 VM 的网卡 MAC 地址:
 
 ```
-方法一(推荐):从 VMware 图形界面查看
+方法一(推荐):启动节点 VM，从 PXE-Host 的 DHCP 日志获取
+  journalctl -u dhcpd | grep DHCPDISCOVER
+  → 找到各节点的 MAC 地址（格式 00:0c:29:xx:xx:xx）
+
+方法二:从 VMware 图形界面的 Advanced Settings 查看
   VM Settings → Network Adapter → Advanced → MAC Address
-
-方法二:先启动节点 VM,进入 UEFI Shell 查看:
-  VM 启动时按 F2 进入 UEFI → Device Manager → Network Device List
-  记录 MAC 地址
-
-方法三:用占位 MAC 先跑,节点 PXE 失败时查 dhcpd 日志获取真实 MAC:
-  tail -f /var/log/dhcp/dhcpd.log  (在 PXE-Host 上)
+  ⚠️ 注意：此处显示的是 VMware 管理 MAC（00:50:56 开头），
+     但实际 PXE 网卡使用的是动态生成 MAC（00:0c:29 开头），两者不同！
+     务必以 DHCP 日志中出现的 MAC 为准。
 ```
+
+> ⚠️ **实测关键**:VMware Workstation 动态生成的网卡 MAC 以 `00:0c:29` 开头,
+> 与 Advanced Settings 中显示的 `00:50:56` 开头的静态 MAC **不同**。
+> 如果用 VMware 界面的 MAC 配置 DHCP,节点会拿到动态 IP(.100~.110 段),
+> 而非绑定的固定 IP。**必须先让节点启动一次,从 DHCP 日志取真实 MAC。**
 
 **获取 MAC 后,更新 dhcpd.conf 和 nodes.json**:
 
@@ -1602,3 +1613,291 @@ ssh root@172.16.3.170 'ip addr show ens192'    # 应该有 100.1.1.170/24
 ---
 
 *验证方案版本:v1 | 对应部署方案:cluster-kunpeng-deploy-v2.md*
+
+---
+
+## 附录B:OpenEuler 22.03 适配与实战问题记录
+
+> 本附录记录实际验证过程中遇到的所有问题及解决方案，按发现顺序排列。
+> 验证环境：Windows 11 + VMware Workstation Pro + OpenEuler 22.03-LTS-SP3 x86_64
+
+---
+
+### B.1 PXE-Host VM 内存不足导致安装卡死
+
+**现象**：挂载 OpenEuler ISO 启动安装时，anaconda 安装器界面一直黑屏，按 Enter/Ctrl+L 无响应。
+
+**原因**：VM 内存只有 768MB，OpenEuler 的 anaconda 安装器最低需要 1.5GB，内存不足导致 TUI 无法渲染。
+
+**解决**：关机后将 VM 内存调整至 **4096MB**，硬盘调整至 **60GB**，重新启动安装。
+
+---
+
+### B.2 Minimal 安装没有 ifconfig
+
+**现象**：安装完成后执行 `ifconfig` 报 `command not found`。
+
+**原因**：`ifconfig` 属于 `net-tools` 包，OpenEuler minimal 安装不包含。
+
+**解决**：使用 `ip a`（等价于 `ifconfig -a`）替代。无需安装额外包。
+
+```bash
+ip a          # 查看所有网口和 IP
+ip a show     # 同上
+```
+
+---
+
+### B.3 网络配置（minimal 安装后无网络）
+
+**现象**：安装完成后节点之间无法互通，SSH 不通。
+
+**解决**：使用 `nmtui` 配置网口静态 IP（nmtui 在 minimal 安装中已包含）：
+
+```bash
+nmtui  # 进入图形化配置
+# Edit a connection → 选择网口 → 手动配置 IP/掩码/网关
+nmcli con up ens36   # 激活连接
+```
+
+---
+
+### B.4 jq 包不在 OpenEuler 本地 ISO 中
+
+**现象**：执行 `dnf install -y jq` 报找不到包。
+
+**原因**：`jq` 不在 OpenEuler 22.03 的标准 ISO 中，且实际上 detect.sh 和 API 均不依赖 jq（API 返回的是 shell 可 source 的 KEY=VALUE 纯文本格式）。
+
+**解决**：**去掉 jq**，安装命令中不包含该包。
+
+---
+
+### B.5 tar 命令未预装
+
+**现象**：执行 `tar --zstd -cpf ...` 报 `-bash: tar: command not found`。
+
+**原因**：OpenEuler minimal 安装不包含 `tar`。
+
+**解决**：在安装服务包时显式添加 `tar`：
+
+```bash
+dnf install -y tar
+```
+
+---
+
+### B.6 密码长度不足 8 位被拒绝
+
+**现象**：chroot 内执行 `echo "root:root123" | chpasswd` 报 `BAD PASSWORD: The password is shorter than 8 characters`。
+
+**原因**：OpenEuler 默认 PAM 密码策略要求最少 8 位。
+
+**解决**：使用 8 位及以上密码，例如 `Huawei12#`：
+
+```bash
+chroot /opt/buildroot-x86 bash -c 'echo "root:Huawei12#" | chpasswd'
+```
+
+---
+
+### B.7 PXE-Host IP 地址与网口名不同于文档
+
+**现象**：文档使用 `172.16.3.10` 和 `ens160`，实际 VMware 分配的网口名为 `ens36`，IP 配置为 `172.16.3.166`。
+
+**原因**：VMware Workstation 网口命名与文档假设的不同，IP 由实际配置决定。
+
+**影响**：以下文件/配置需全部使用实际 IP 和网口名：
+- detect.sh、firstboot-main.sh 中的 IP 地址
+- grub.cfg 中的 `pxe_server=`
+- dhcpd.conf 中的 `next-server` 和 `domain-name-servers`
+- nodes.json 中的 `ctrl_gw`
+- /etc/sysconfig/dhcpd 中的 `DHCPDARGS`
+
+**操作**：确认实际 IP 后全局替换：
+
+```bash
+# 更新 firstboot 脚本中的 IP
+sed -i 's/172.16.3.10/实际IP/g' /opt/firstboot/detect.sh
+sed -i 's/172.16.3.10/实际IP/g' /opt/firstboot/firstboot-main.sh
+# 同步更新 buildroot 内的副本
+sed -i 's/172.16.3.10/实际IP/g' /opt/buildroot-x86/etc/node-role/detect.sh
+sed -i 's/172.16.3.10/实际IP/g' /opt/buildroot-x86/etc/node-role/firstboot-main.sh
+# 重新打包镜像
+```
+
+---
+
+### B.8 DHCP 监听网口配置错误
+
+**现象**：dhcpd 启动失败，`journalctl` 报 `No subnet declaration for ens160 (no IPv4 addresses)`。
+
+**原因**：`/etc/sysconfig/dhcpd` 中配置的 `DHCPDARGS=ens160`，但实际网口名为 `ens36`，该网口上没有 IP 地址，dhcpd 拒绝在无 IP 的网口上监听。
+
+**解决**：用实际网口名更新配置：
+
+```bash
+# 先确认 PXE 网口名
+ip a  # 找到有 172.16.3.x 地址的网口
+
+cat > /etc/sysconfig/dhcpd << 'EOF'
+DHCPDARGS=ens36   # 替换为实际网口名
+EOF
+systemctl restart dhcpd
+```
+
+---
+
+### B.9 MAC 地址获取方式错误导致 DHCP 固定 IP 绑定失败
+
+**现象**：节点启动后 DHCP 分配到动态 IP（172.16.3.100），而非绑定的固定 IP（如 172.16.3.170）。
+
+**原因**：从 VMware `VM Settings → Network Adapter → Advanced → MAC Address` 看到的是 `00:50:56` 开头的静态管理 MAC，而节点 PXE 网卡实际使用的是 VMware 动态生成的 `00:0c:29` 开头的 MAC，两者不同。
+
+**解决**：让节点 VM 启动一次，从 PXE-Host 的 DHCP 日志中读取真实 MAC：
+
+```bash
+journalctl -u dhcpd | grep DHCPDISCOVER
+# 输出示例: DHCPDISCOVER from 00:0c:29:c9:e7:77 via ens36
+# 00:0c:29:c9:e7:77 即为真实 MAC
+```
+
+---
+
+### B.10 DHCP 旧租约冲突
+
+**现象**：更新 MAC 绑定后 dhcpd 日志出现红色 `uid lease 172.16.3.100 for client xx is duplicate on 172.16.3.0/24`。
+
+**原因**：节点之前拿过动态 IP（.100），旧租约记录仍在 `dhcpd.leases` 文件中，与新固定地址冲突。
+
+**解决**：清空租约文件并重启：
+
+```bash
+systemctl stop dhcpd
+> /var/lib/dhcpd/dhcpd.leases
+systemctl start dhcpd
+```
+
+> ✅ 这只是告警，不影响实际 IP 分配（节点仍会拿到正确的固定 IP）。
+
+---
+
+### B.11 TFTP 文件权限不足
+
+**现象**：节点 PXE 启动时 UEFI 一直回到 Boot Manager，或用 curl 测试 TFTP 报 `Permission denied`。
+
+**原因**：从 `/boot/efi/EFI/openEuler/` 复制的 `grubx64.efi` 保留了原始权限 `700`（仅 root 可读），TFTP 服务以非 root 用户运行，无法读取。
+
+**解决**：复制文件后立即修改权限：
+
+```bash
+chmod 644 /var/lib/tftpboot/*
+# 验证
+curl -v tftp://172.16.3.166/grubx64.efi -o /tmp/test.efi
+```
+
+---
+
+### B.12 DHCP class 架构匹配错误（PXEClient:Arch:00007 vs 00009）
+
+**现象**：DHCP 分配了 IP，但节点收不到 `filename`，不知道去 TFTP 取什么文件，PXE 失败。
+
+**原因**：文档中 `class "x86-uefi"` 匹配 `PXEClient:Arch:00007`（32位 EFI），但 VMware x86_64 UEFI 实际发送的是 `PXEClient:Arch:00009`（64位 EFI），class 不匹配，`filename "grubx64.efi"` 不下发。
+
+**解决**：去掉 class 匹配，直接在 subnet 层配置 filename：
+
+```bash
+subnet 172.16.3.0 netmask 255.255.255.0 {
+    range 172.16.3.100 172.16.3.110;
+    option routers 172.16.3.1;
+    next-server 172.16.3.166;
+    filename "grubx64.efi";   # ← 直接在 subnet 层配置，所有客户端生效
+}
+```
+
+---
+
+### B.13 dracut 自定义模块在 OpenEuler 中无法加载
+
+**现象**：dracut 报 `dracut module '99deploy' cannot be found or installed` 或 `dracut module 'dracut-initqueue' cannot be found or installed`。
+
+**原因**：OpenEuler 22.03 的 dracut 版本对自定义模块的加载机制与 Rocky Linux 9 不同，`dracut-initqueue` 已内置无需单独指定，自定义 `99deploy` 模块报找不到。
+
+**解决**：改用 `--include` 方式直接注入文件，不依赖模块系统：
+
+```bash
+dracut --force --no-hostonly \
+    --add 'network base' \
+    --include /tmp/deploy.sh /deploy.sh \
+    --include /tmp/run-deploy.sh /lib/dracut/hooks/initqueue/online/99-deploy.sh \
+    --install 'sgdisk mkfs.xfs mkfs.vfat partprobe wget blkid lsblk curl grep awk sed cut tr tar zstd touch sleep reboot chroot mount umount mkdir cat bash' \
+    --omit 'plymouth biosdevname' \
+    --kver $(rpm -q kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' | tail -1) \
+    /var/lib/tftpboot/initrd-x64-deploy.img
+chmod 644 /var/lib/tftpboot/initrd-x64-deploy.img
+```
+
+> ⚠️ 如果之前创建过 `/usr/lib/dracut/modules.d/99deploy/` 目录，**必须删除**，否则会覆盖 `--include` 注入的新文件：
+> ```bash
+> rm -rf /usr/lib/dracut/modules.d/99deploy
+> ```
+
+---
+
+### B.14 initrd 缺少必要命令（seq/head/zstd）
+
+**现象**：节点进入 initrd 后 deploy.sh 报 `seq: command not found`、`head: command not found`，或 tar 解压失败（zstd 不可用）。
+
+**原因**：`seq`、`head` 是 coreutils 命令，`zstd` 是独立的压缩工具，这些命令在默认 initrd 中不包含，需要用 `--install` 显式加入。另外 `tar --zstd` 依赖外部 `zstd` 二进制，也需要单独包含。
+
+**解决**：
+1. 修改 deploy.sh 避免使用 `seq` 和 `head`（用 while 循环和 awk 替代）：
+```bash
+# 替换 for i in $(seq 1 30)
+i=0; while [ $i -lt 30 ]; do ...; i=$((i+1)); done
+
+# 替换 head -1
+awk 'NR==1'
+
+# 替换 tar --zstd 管道
+wget -q -O - "..." | zstd -d | tar -xpf - -C /newroot
+```
+2. 在 dracut `--install` 中加入 `zstd`（见 B.13）。
+
+---
+
+### B.15 pre-mount 钩子超时导致 switch-root 失败
+
+**现象**：deploy.sh 打印 `[deploy] Downloading and extracting base image...` 后立刻出现 `[FAILED] Failed to start Switch Root`，下载实际没有完成。
+
+**原因**：`pre-mount` 钩子有 systemd 超时限制，dracut 在后台并行寻找根文件系统，发现无根文件系统后触发 switch-root 失败，不等待 pre-mount 中的长时间下载操作。
+
+**解决**：将钩子从 `pre-mount` 改为 **`initqueue/online`**。`initqueue/online` 在网络就绪时触发，dracut 会等待 initqueue 处理完成才进入下一阶段：
+
+```bash
+# 错误：--include /tmp/run-deploy.sh /lib/dracut/hooks/pre-mount/99-deploy.sh
+# 正确：
+--include /tmp/run-deploy.sh /lib/dracut/hooks/initqueue/online/99-deploy.sh
+```
+
+---
+
+### B.16 当前验证进度（截止本次）
+
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| VMware 网络配置 | ✅ | VMnet2(172.16.3.0/24) + VMnet3(100.1.1.0/24) |
+| goldenos OS 安装 | ✅ | OpenEuler 22.03-LTS-SP3，IP: 172.16.3.166 |
+| buildroot 构建 | ✅ | /opt/buildroot-x86，含 firstboot 脚本 |
+| base.tar.zst 打包 | ✅ | /var/www/html/images/base.tar.zst |
+| HTTP 服务 | ✅ | httpd 运行正常 |
+| TFTP 服务 | ✅ | tftp.socket 运行，权限已修正 |
+| GRUB 菜单 | ✅ | grub.cfg 配置正确 |
+| DHCP 服务 | ✅ | ens36 监听，subnet 级 filename，固定 IP 绑定 |
+| node-config API | ✅ | 8888 端口，返回正确 KEY=VALUE |
+| deploy initrd | ✅ | --include 方式构建，含 zstd/tar 等命令 |
+| 节点 PXE 引导 | ✅ | subswath-01 成功 DHCP→TFTP→GRUB→initrd |
+| 磁盘分区格式化 | ✅ | GPT + EFI 512M + root xfs |
+| 镜像下载解压 | ⬜ | 待验证（initqueue/online 钩子调整后） |
+| GRUB 安装 | ⬜ | 待验证 |
+| firstboot 触发 | ⬜ | 待验证 |
+| 完整端到端验证 | ⬜ | 待验证 |
