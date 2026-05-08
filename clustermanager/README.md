@@ -259,6 +259,38 @@ cluster-manager-linux-arm64.tar.gz
 
 ## 变更记录
 
+### 2026-05-08 — 故障诊断脚本配置持久化与发布包支持
+
+**背景**：脚本库配置完成后需打入发布包，新环境首次启动可直接复用，无需手动重建。
+
+| 文件 | 变更 |
+|------|------|
+| `backend/config.py` | 新增 `SCRIPTS_BUNDLE_PATH`（指向 `<安装目录>/scripts_bundle.json`） |
+| `backend/models/seed.py` | `_seed_diag_scripts()` 启动时优先读取 `scripts_bundle.json`；文件存在则从中加载，否则回退到内置默认脚本 |
+| `backend/api/diagnose.py` | 新增 4 个脚本管理接口（见下表） |
+| `frontend/src/views/Diagnose.vue` | 诊断页顶部新增「脚本配置」全局操作栏，含导出 / 导入 / 保存为发布配置三个按钮及发布包状态标签 |
+
+**新增后端接口**：
+
+| 接口 | 说明 |
+|------|------|
+| `GET  /api/diagnose/scripts/export` | 导出全部脚本为 `scripts_bundle.json`（浏览器触发下载） |
+| `POST /api/diagnose/scripts/import` | 批量导入脚本 JSON；`mode=merge`（默认）按 `tab+category+name` upsert，`mode=replace` 先清空再导入 |
+| `POST /api/diagnose/scripts/save-bundle` | 将当前数据库脚本快照写入服务端 `scripts_bundle.json` |
+| `GET  /api/diagnose/scripts/bundle-info` | 返回发布包是否存在、脚本数量、最后修改时间 |
+
+**使用流程**：
+```
+1. 在诊断页配置好全部脚本（增删改）
+2. 点击「保存为发布配置」→ 生成 backend/scripts_bundle.json
+3. 打包 release 时将 scripts_bundle.json 随安装包一同发布
+4. 新环境首次启动 → 自动从 scripts_bundle.json 加载脚本，无需手动重建
+```
+
+也可通过「导出配置」将 JSON 下载后离线传递，目标环境通过「导入配置」合并（不清空已有脚本）。
+
+---
+
 ### 2026-05-08 — 新增 Acquisition 角色 + 角色数量允许为 0 + Bootstrap 卡片底色修复
 
 | 文件 | 变更 |
