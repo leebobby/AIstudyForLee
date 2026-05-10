@@ -23,6 +23,7 @@
 - [10 验证检查点与预期结果](#10-验证检查点与预期结果)
 - [11 常见问题排查](#11-常见问题排查)
 - [附录:与真实鲲鹏环境的差异对照](#附录与真实鲲鹏环境的差异对照)
+- [12 实测问题记录(2026-05-08)](#12-实测问题记录2026-05-08)
 
 ---
 
@@ -1607,6 +1608,142 @@ ssh root@172.16.3.170 'ip addr show ens192'    # 应该有 100.1.1.170/24
 2. 将 GRUB cfg 的 `grubx64.efi` 改为 `grubaa64.efi`
 3. 将 `grub2-install --target=x86_64-efi` 改为 `--target=arm-efi`
 4. 替换镜像为 aarch64 版本
+
+---
+
+## 12 实测问题记录(2026-05-08)
+
+### 问题1:安装 GoldenOS 时 ISO 挂载卡住
+
+**现象**:在 VMware 中用 ISO 安装 GoldenOS VM 时,安装过程中卡住无法继续。
+
+**原因排查**:
+- ISO 中的默认安装流程尝试从网络下载额外软件包(GoldenOS 的默认源),而 VM 没有外网
+- 虚拟磁盘空间分配不足(建议至少 60GB)
+
+**解决方案**:
+
+```bash
+# 方法1:在安装时先挂载本地 ISO 作为安装源
+# 安装器界面 → Installation Source → 选择本地 ISO 文件
+
+# 方法2:VM 磁盘扩容(事后)
+# 在 VMware 中:VM Settings → Hard Disk → Expand → 设置更大容量
+# 扩容后在 VM 内扩展分区:
+growpart /dev/sda 2
+xfs_growfs /
+```
+
+**实测经验**: 使用 OpenEuler 22.03 LTS SP3 x86_64 Everything ISO,在安装源设置中选择本地 ISO 即可避免联网,安装顺利完成。
+
+---
+
+### 问题2:PXE 部署后节点不带 GoldenOS 上安装的软件和目录
+
+**现象**:PXE 引导后节点启动成功,但 GoldenOS 上手动安装的软件、创建的目录、配置的服务都不存在。
+
+**根本原因**:
+
+```
+GoldenOS VM(已安装软件) ←─ 未打包 ─→ base.tar.zst(旧版本,仍是最小化 buildroot)
+                                              ↑
+                                   PXE 部署时节点下载的是这个
+```
+
+PXE 节点部署时执行的 `deploy.sh` 只会下载 `base.tar.zst` 并解压到磁盘。
+**如果 `base.tar.zst` 里没有你安装的软件,部署后自然不会有。**
+
+**解决方案:在 GoldenOS 上安装好所有软件后,必须重新打包为 `base.tar.zst`**
+
+```bash
+# ── 在 GoldenOS VM 上执行 ──
+
+# 确认已安装的软件在系统中
+rpm -qa | sort > /tmp/pkg-list.txt
+cat /tmp/pkg-list.txt
+
+# 清理临时文件(减小镜像体积)
+dnf clean all
+rm -rf /tmp/* /var/tmp/* /root/.bash_history
+
+# 打包整个系统(排除虚拟文件系统)
+tar --zstd -cpf /tmp/base.tar.zst \
+    --numeric-owner \
+    --exclude='/proc/*' \
+    --exclude='/sys/*' \
+    --exclude='/dev/*' \
+    --exclude='/tmp/*' \
+    --exclude='/run/*' \
+    --exclude='/mnt/*' \
+    --exclude='/media/*' \
+    --exclude='/var/cache/dnf/*' \
+    -C / .
+
+echo "GoldenOS 镜像大小:"
+du -sh /tmp/base.tar.zst
+
+# ── 从 GoldenOS 将镜像传到 PXE-Host ──
+scp /tmp/base.tar.zst root@172.16.3.10:/var/www/html/images/base.tar.zst
+
+# ── 在 PXE-Host 上验证镜像 ──
+sha256sum /var/www/html/images/base.tar.zst > /var/www/html/images/SHA256SUMS
+curl -I http://172.16.3.10/images/base.tar.zst   # 确认 HTTP 可访问
+```
+
+> ⚠️ **重要**: 每次在 GoldenOS 上修改软件/配置后,都必须重新执行上述打包步骤,  
+> 否则 PXE 部署出来的节点仍然是旧版本。
+
+---
+
+### 问题3:GoldenOS 与 buildroot 方案的选择
+
+| 方案 | 说明 | 优点 | 缺点 |
+|---|---|---|---|
+| **buildroot 方案**(§5) | 在 PXE-Host 上用 `dnf --installroot` 构建最小化镜像 | 镜像体积小(~500MB);全部脚本化,可重复 | 配置灵活度低;需要在脚本里指定所有包 |
+| **GoldenOS 方案** | 手动搭建一台完整 VM,安装配置好后打包 | 可交互式安装调试;所见即所得 | 镜像体积大(~2-4GB);需要手动维护 |
+
+**建议流程(GoldenOS 方案)**:
+
+```
+1. 创建 GoldenOS VM(从 ISO 安装)
+2. 配置网络、安装所需软件、创建目录结构
+3. 写入 firstboot 脚本到 /etc/node-role/
+4. 打包 → scp 到 PXE-Host
+5. 节点 PXE 启动 → 下载镜像 → 解压 → 重启 → firstboot 运行
+```
+
+---
+
+### 问题4:TFTP 文件权限导致节点 PXE 启动一直返回 Boot Manager
+
+**现象**:节点 DHCP 获取到 IP、也下载了 `grubx64.efi`,但 GRUB 界面无法出现,一直循环回 UEFI Boot Manager。
+
+**原因**: `grubx64.efi` 从 `/boot/efi/EFI/openEuler/` 复制过来权限是 `700`,TFTP 服务以非 root 用户运行,无读取权限。
+
+**修复**:
+```bash
+chmod 644 /var/lib/tftpboot/*
+chmod 644 /var/lib/tftpboot/grub.cfg
+systemctl restart tftp.socket
+```
+
+---
+
+### 问题5:DHCP class 匹配失败导致节点拿不到 PXE filename
+
+**现象**:节点 DHCP 获取到 IP,但拿不到 `filename`(即 `grubx64.efi`),无法触发 PXE 引导。
+
+**原因**: VMware x86_64 UEFI 发出的 DHCP Discover 携带 `PXEClient:Arch:00009`(64位 EFI),而文档中用 `class "PXEClient:Arch:00007"` 匹配的是 32 位 EFI,两者不符导致 filename 不下发。
+
+**修复**: 去掉 class 匹配,直接在 subnet 层配置 `filename`:
+```conf
+subnet 172.16.3.0 netmask 255.255.255.0 {
+    range 172.16.3.100 172.16.3.110;
+    option routers 172.16.3.1;
+    next-server 172.16.3.10;
+    filename "grubx64.efi";    # 直接在 subnet 配置,对所有客户端生效
+}
+```
 
 **其余所有逻辑完全不需要修改。**
 
