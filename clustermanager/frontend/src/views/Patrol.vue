@@ -26,7 +26,7 @@
         <el-col :span="6">
           <el-progress
             :percentage="patrolSummary.pass_rate"
-            :color="#67c23a"
+            color="#67c23a"
             style="margin-top: 20px"
           >
             <template #default="{ percentage }">

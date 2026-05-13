@@ -259,6 +259,55 @@ cluster-manager-linux-arm64.tar.gz
 
 ## 变更记录
 
+### 2026-05-13 — Windows 桌面 App 模式 + 编码问题修复
+
+**背景**：cluster-manager 由「部署到 ARM 服务器 + 浏览器访问」改为「直接部署在 Windows 管理站
+作为桌面应用」。启动后不再打开浏览器，而是弹出原生应用窗口；后端在内部启动 uvicorn，对外远程
+操作 ARM 集群（SSH 控制面 / Redfish BMC / IPMI / DHCP-TFTP-HTTP）。
+
+同时修复 `build.bat` 在中文 Windows 上 UTF-8 / GBK 代码页冲突导致的乱码与命令解析失败。
+
+| 文件 | 变更 |
+|------|------|
+| `backend/desktop.py` | **新文件** — 桌面版启动器：后台线程跑 uvicorn，主线程 pywebview 打开 1400×900 原生窗口；端口被占用时自动顺延 8001..8049；冻结模式下日志重定向到 `cluster_manager.log` |
+| `backend/requirements.txt` | 新增 `pywebview>=5.0`（Windows 用 Edge WebView2 后端） |
+| `backend/cluster_manager.spec` | 入口由 `main.py` 改为 `desktop.py`；`console=False` 纯 App 体验；`collect_all('webview')` 收集 pywebview 全部资源；hiddenimports 加 `webview.platforms.edgechromium` / `clr_loader` / `proxy_tools` 等 |
+| `backend/main.py` | 保留 `__main__` 入口作为纯后端开发模式（`python main.py`） |
+| `build.bat` | **完全重写**，全 ASCII 英文文本（中文 Windows 上代码页不再出错）；用 `>>` 追加和 `copy` 替代 `( echo ... )` 多行重定向块；不再在 .bat 里嵌入要生成的 start.bat / README.txt，改为从 `build_templates/` 复制 |
+| `build_templates/start.bat` | **新文件** — 用户启动器模板，ASCII，`start "" cluster-manager.exe` 后立即返回 |
+| `build_templates/README.txt` | **新文件** — 中文部署说明，含 WebView2 Runtime 要求、目录结构、网络要求、初次部署/更新部署流程、端口冲突处理、排错指引 |
+
+**目标机部署步骤**：
+
+```
+1. 解压 cluster-manager-windows.zip
+2. (可选) 在 iso\ 目录放置 PXE Host 装机 ISO
+3. 双击 cluster-manager.exe (或 start.bat)
+4. 自动弹出 "Cluster Manager" 原生窗口 (无浏览器)
+```
+
+**运行时要求**：
+- Windows 10 / 11 x64
+- Microsoft Edge WebView2 Runtime（Win11 内置；Win10 缺失时程序首次启动会引导安装，
+  或从 https://aka.ms/webview2 手动下载）
+
+**网络要求**：目标 Windows 主机需同时可达集群节点的 BMC（管理面 GE，通常 `172.16.0.0/24`）
+和 控制面（10GE，通常 `172.16.3.0/24`）。
+
+**为什么用 pywebview 而不是 Electron**：体积小（无需打包 Chromium，复用系统 WebView2，
+通常 < 100MB onedir）；Python + FastAPI 现有后端无需改动；窗口生命周期管理直接绑定到
+进程退出。
+
+**调试入口**：`console=False` 模式下日志写入 EXE 同目录的 `cluster_manager.log`；
+开发阶段可以 `python desktop.py` 跑桌面版、`python main.py` 跑纯服务器版。
+
+**编码问题修复说明**：原 `build.bat` 含中文 echo 与 `( echo ... echo ... )` 多行重定向块，
+在中文 Windows（默认 GBK 代码页）下读取 UTF-8 字节会乱码，且 `(...)` 块内的 `cluster-manager.exe`
+等行被 cmd 解析器误拆为外层命令。新版本所有 echo 全英文、所有生成文件改为「模板 + copy」
+模式，彻底回避代码页问题。
+
+---
+
 ### 2026-05-08 — 故障诊断脚本配置持久化与发布包支持
 
 **背景**：脚本库配置完成后需打入发布包，新环境首次启动可直接复用，无需手动重建。
