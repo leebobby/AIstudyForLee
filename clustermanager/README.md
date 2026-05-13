@@ -259,6 +259,124 @@ cluster-manager-linux-arm64.tar.gz
 
 ## 变更记录
 
+### 2026-05-13 — IP 规划：新规划为准 + 单按钮 UX 修复
+
+**问题**：用户做了新规划（5 节点）后，节点配置仍显示旧的 23 节点、节点管理为空。原因有二：
+1. 之前的合并语义是「保留旧的多余节点不删」，缩容后看不出变化
+2. 「生成规划」（仅预览）和「应用到 nodes.json」（真正保存）两个按钮容易让用户以为预览即保存
+
+| 文件 | 变更 |
+|------|------|
+| `backend/api/pxe.py` `_merge_nodes_json` | 改语义为「**新规划为 source of truth**」：同 hostname 用旧 MAC（若真实）+ 新 IP 字段；新 hostname 追加；**旧规划里有但本次不在的 → 删除**（不再保留），符合用户的"相同覆盖 / 新增即可"语义 |
+| `backend/api/pxe.py` `_sync_nodes_json_to_db_impl` | 新增 `prune_missing` 参数（默认 True）；同步时按 `master-*/slave-*/subswath-*/gstorage-*/acquisition-*` 前缀匹配规划生成的节点，**hostname 不在本次规划中 → 从 DB 删除**；手动添加的节点（不匹配上述前缀）不动 |
+| `backend/api/pxe.py` `/nodes-json/regenerate` 响应 | 返回 `added/updated/removed` 列表（之前是 `added/updated/kept`），并附 `db: {created, updated, deleted}` 完整统计 |
+| `frontend/src/views/PXEDeploy.vue` | 「生成规划」和「应用到 nodes.json」两按钮合并简化：主按钮「**应用规划 (保存到 nodes.json + 节点管理)**」success 色一键完成；次按钮「**仅预览**」plain 色仅查看不保存 |
+| `frontend/src/views/PXEDeploy.vue` | 新增 `planSaved` 响应式状态：仅预览时 `planSaved=false` 显示**橙色 warning 条**"当前未保存,点击应用规划保存"；应用成功后 `planSaved=true` 显示**绿色 success 条**"已保存到 nodes.json,节点管理已同步"；`watch(planForm, deep)` 在用户改任意 count 时把 `planSaved` 重置为 false |
+| `frontend/src/views/PXEDeploy.vue` 确认弹窗 | 列出明确规则：同名保 MAC + 新增追加 + **旧规划被删除**（之前文案说"保留不删"，与新行为不一致） |
+| `frontend/src/views/PXEDeploy.vue` 成功 toast | `已保存到 nodes.json: 新增 X / 更新 Y / 删除 Z; 节点管理: 新建 N 离线 / 删除 M` 直接对账 |
+
+**新合并示例**：
+
+```
+旧 nodes.json (23):              新规划 (5):           合并后 (5):
+  00:11:.. master-01            aa:bb:.. master-01    00:11:.. master-01  ← 真 MAC 保留, IP 新算
+  aa:bb:.. master-02..07                              ← 删除 (不在新规划)
+  aa:bb:.. slave-01..02         aa:bb:.. slave-01..02 aa:bb:.. slave-01..02
+  aa:bb:.. slave-03..13                               ← 删除
+  aa:bb:.. subswath-01..02      aa:bb:.. subswath-01  aa:bb:.. subswath-01
+  aa:bb:.. gstorage-01          aa:bb:.. gstorage-01  aa:bb:.. gstorage-01
+```
+
+**DB 清理边界**：只删除符合规划前缀（master-/slave-/subswath-/gstorage-/acquisition-）且不再在本次规划的节点；用户在「节点管理」手动新建的节点（不匹配前缀）一律不动。
+
+**用户感受变化**：
+
+| 操作 | 之前 | 现在 |
+|---|---|---|
+| 改 Master 从 7 缩到 1, 应用 | nodes.json 仍 23 个 (旧的 6 个一直堆着) | nodes.json 严格为 5 个, 节点管理同步删除 6 个 |
+| 改完 count 没点应用就跳到节点配置 | 没人提醒, 用户以为已保存 | 主按钮变 success 大字; 预览框上方橙色未保存警告 |
+| 应用后查看 | 上方绿色提示, 但和预览一样的措辞 | 上方绿色 ✓ "已保存"; toast 详细列出 added/updated/removed/db_deleted |
+| 改了 count 但没重新应用 | 状态保持"已保存" (假象) | watch 立即把状态切回"未保存", 提示重新应用 |
+
+---
+
+### 2026-05-13 — IP 规划合并落库 + 节点状态贯通诊断目标过滤
+
+**用户场景**：
+- 想看到 IP 规划保存到 nodes.json 后的节点 → 直接出现在「节点管理」页，且未部署的显示为离线
+- 诊断脚本的目标节点下拉只列出**真正在线**的节点（offline 节点 SSH 拨不通，不应出现）
+- 多次执行 IP 规划时，已经填了真实 MAC / 已部署的节点不能被覆盖丢失
+
+| 文件 | 变更 |
+|------|------|
+| `backend/api/pxe.py` | 新增 `_is_placeholder_mac`、`_index_by_hostname`、`_merge_nodes_json` 三个辅助函数；`/nodes-json/regenerate` 改为**合并语义**：同 hostname 保留旧 MAC（若为真实 MAC `非 aa:bb:cc:* 前缀`）+ IP 字段用新规划；新 hostname 追加；旧 hostname 不在新规划中 → 保留不删。regenerate 内部自动调用 `_sync_nodes_json_to_db_impl()` 落库，返回 `{added, updated, kept, db: {created, updated}}` 详细计数 |
+| `backend/api/pxe.py` | `/nodes-json/sync-to-db` 抽出 `_sync_nodes_json_to_db_impl()` 内部函数；新节点创建时显式设 `status=ctrl_status=data_status='offline'`；**更新已存在节点时只覆盖规划字段（IP/MAC/role），不动状态字段** —— 避免在线节点被规划重置成离线 |
+| `frontend/src/views/Diagnose.vue` | 新增 `onlineNodes` 计算属性 `nodes.filter(n => n.status === 'online')`；运行对话框的「目标节点」下拉只渲染 onlineNodes，无在线节点时下拉禁用并显示橙色提示；`openRunDialog()` 时调 `loadNodes()` 拉一次最新状态 |
+| `frontend/src/views/PXEDeploy.vue` | `applyPlanToNodesJson()` 改为单次 POST（regenerate 内部已落库，无需再 POST sync-to-db）；确认弹窗文案说明合并语义；成功 toast 显示 `新增 X / 更新 Y / 保留 Z；节点管理新建 N 个离线节点`，让用户能直接对账 |
+
+**合并算法（regenerate）**：
+
+```
+old nodes.json:           new defaults:            merged:
+  00:11:.. master-01        aa:bb:.. master-01  →  00:11:.. master-01   (旧 MAC 真实, 保留; IP 用新)
+  aa:bb:.. master-02        aa:bb:.. master-02  →  aa:bb:.. master-02   (旧 MAC 占位, 用新)
+                            aa:bb:.. master-03  →  aa:bb:.. master-03   (新增)
+  00:22:.. legacy-host                          →  00:22:.. legacy-host (旧的不在新规划中, 保留)
+```
+
+**用户感受变化**：
+
+| 操作 | 之前 | 现在 |
+|---|---|---|
+| 第二次跑 IP 规划应用 | 已填的 MAC 被冲掉，状态被重置为 offline | MAC 保留；状态保留；按 hostname 合并 |
+| IP 规划 → 节点管理 | 需要手动二次同步才能看到 | regenerate 内部已落库，一次按钮全部到位 |
+| 选择诊断目标节点 | 列出所有节点 (offline 也在列, 选了必然 SSH 失败) | 只列 online 节点，无 online 时下拉禁用并提示 |
+
+---
+
+### 2026-05-13 — SSH 凭据持久化 + 流式诊断 + 局域网共享模式
+
+**背景**：每次执行诊断脚本都要输密码、串行执行慢、Windows 上有时需要让别的机器也能浏览器
+访问。三处一起改：
+
+| 改进 | 实现 |
+|------|------|
+| ① **SSH 凭据持久化** | `backend/services/cred_service.py` 把 user/password/port 写到 `BASE_DIR/ssh_credentials.json`；后端 `POST /api/diagnose/scripts/{id}/run` 接受 `********` 占位密码自动回退到已保存的；首次成功执行后自动保存 |
+| ② **诊断脚本流式执行** | 把 run 接口改为 `StreamingResponse` (SSE `text/event-stream`)；多节点用 `asyncio.create_task` + `ThreadPoolExecutor(16)` 并行 SSH；每节点完成立即 emit `data: {...}` 一条事件，前端 `fetch` + `ReadableStream` 解析后追加到结果列表 |
+| ③ **局域网共享模式** | `backend/desktop.py` 读 `CLUSTER_MANAGER_BIND` 环境变量，默认 `127.0.0.1`，设为 `0.0.0.0` 时绑定所有网卡；窗口标题显示局域网可访问 URL；`build_templates/start-shared.bat` 一键开启 |
+
+**新增 / 修改文件**：
+
+| 文件 | 变更 |
+|------|------|
+| `backend/services/cred_service.py` | **新文件** — `load_creds / save_creds / clear_creds / get_public_info / resolve_password`；密码占位符 `********` 由 `resolve_password()` 回退到磁盘已保存的密码 |
+| `backend/api/diagnose.py` | run 接口改异步 + SSE 流式 + 并行；新增 `GET/POST/DELETE /api/diagnose/ssh-creds`；运行时若收到非占位符密码会自动调用 `cred_service.save_creds()`；事件结构 `start`/`result`/`end` |
+| `backend/desktop.py` | `BIND_HOST` 从 `CLUSTER_MANAGER_BIND` 环境变量取；`_list_lan_ips()` 列出非环回 IPv4；共享模式窗口标题展示 `LAN: http://<ip>:<port>, ...`；pywebview 始终走 `127.0.0.1` 不受 BIND 影响 |
+| `frontend/src/views/Diagnose.vue` | `openRunDialog()` 自动调 `GET /ssh-creds` 预填用户名/端口、密码字段填 `********` 占位；`executeScript()` 改为 `fetch` 消费 SSE 流，每收到一条 `result` 事件就 `runResults.push(evt)` 增量渲染；新增「已完成 N / 总数」进度文本和「已保存凭据」标签 |
+| `build_templates/start-shared.bat` | **新文件** — `set CLUSTER_MANAGER_BIND=0.0.0.0` 后再启 EXE |
+| `build_templates/README.txt` | 加局域网共享模式说明、`ssh_credentials.json` 文件说明、更新部署时保留 `ssh_credentials.json` |
+| `build.bat` | 同时拷贝 `start.bat` 和 `start-shared.bat` |
+| `.gitignore` | 加 `backend/ssh_credentials.json` |
+
+**用户体感变化**：
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 第二次起跑脚本 | 重新输密码 | 自动用上次的（密码栏显示 `********`，改了就更新保存） |
+| 5 节点 30s 脚本 | 串行 150s 全黑屏 | 并行 ~30s，每节点完成立刻显示 |
+| 同事临时看一眼 | 必须远程到 Windows | 双击 `start-shared.bat`，把窗口标题里的 LAN URL 发给他即可 |
+
+**关于 Q4 (手动纳管未部署机器)**：节点页 `frontend/src/views/Nodes.vue` 在 2026-05-05 已支持
+新增/编辑/删除节点，并已包含 hostname / node_type / mgmt_ip / bmc_ip / ctrl_ip / data_ip /
+五类硬件字段共五个区块。手动添加的节点和 PXE 部署的节点在数据库里同等对待，可以直接进入
+故障诊断 → 选中节点 → 跑脚本。本次未做额外改动。
+
+**安全提示**：`ssh_credentials.json` 含明文密码，文件加进了 `.gitignore`；启用共享模式时
+（`0.0.0.0`），同网段任何能访问到端口的机器都能调 API 跑脚本，**生产环境请配合防火墙限制
+源 IP**，或仅在临时演示时启用。
+
+---
+
 ### 2026-05-13 — Windows 桌面 App 模式 + 编码问题修复
 
 **背景**：cluster-manager 由「部署到 ARM 服务器 + 浏览器访问」改为「直接部署在 Windows 管理站

@@ -2,10 +2,12 @@
 故障诊断 API
 """
 
+import asyncio
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
@@ -14,7 +16,11 @@ import re
 from models.node import Node, Log, FaultPoint, DPDKStats, RDMAStats, DiagScript, get_db
 from pydantic import BaseModel
 from services.diag_service import run_ssh_command, collect_node_logs
+from services import cred_service
 from config import SCRIPTS_BUNDLE_PATH
+
+# 全局执行器: 诊断脚本通常都不算 CPU 密集, 给一个共享池足够
+_SSH_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="ssh-exec")
 
 
 router = APIRouter()
@@ -533,56 +539,156 @@ def get_bundle_info():
 
 
 class ScriptRunRequest(BaseModel):
-    node_ids: List[int]
-    ssh_user: str
-    ssh_password: str
+    node_ids: List[int] = []           # 从节点管理中选择的节点 ID
+    target_ips: List[str] = []         # 直接指定 IP（不依赖节点管理）
+    ssh_user: str = "root"
+    ssh_password: str = ""
     ssh_port: int = 22
 
 
+def _resolve_host(node: Node) -> Optional[str]:
+    """SSH 走控制面 (10GE), 优先 ctrl_ip, 兜底 mgmt_ip"""
+    return node.ctrl_ip or node.mgmt_ip
+
+
 @router.post("/scripts/{script_id}/run")
-def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depends(get_db)):
-    """在指定节点上执行诊断脚本"""
+async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depends(get_db)):
+    """
+    在指定节点上并行执行诊断脚本, 通过 SSE 流式返回每节点结果。
+
+    返回 text/event-stream, 每条事件形如:
+      data: {"type":"start","total":3}\\n\\n
+      data: {"type":"result","node_id":1,"hostname":"slave-01",...}\\n\\n
+      data: {"type":"end"}\\n\\n
+
+    密码处理:
+      - ssh_password 为空 或 ******** 时, 使用已保存的凭据
+      - 非空且非占位符时, 视为新密码, 执行成功后自动保存到 ssh_credentials.json
+    """
     script = db.query(DiagScript).filter(DiagScript.id == script_id).first()
     if not script:
         raise HTTPException(status_code=404, detail="脚本不存在")
 
-    nodes = db.query(Node).filter(Node.id.in_(req.node_ids)).all()
-    if not nodes:
-        raise HTTPException(status_code=400, detail="未找到指定节点")
+    # 节点列表可以为空(纯手动 IP 模式), 校验放到合并 target_ips 之后
+    nodes = db.query(Node).filter(Node.id.in_(req.node_ids)).all() if req.node_ids else []
 
-    results = []
-    for node in nodes:
-        host = node.mgmt_ip
-        if not host:
-            results.append({
-                "node_id": node.id,
-                "hostname": node.hostname,
-                "success": False,
-                "stdout": "",
-                "stderr": "节点无管理面IP",
-                "exit_code": -1
-            })
-            continue
+    # 解析密码: 优先用前端传入的明文, 否则用已保存的
+    password = cred_service.resolve_password(req.ssh_password)
+    if not password:
+        raise HTTPException(status_code=400, detail="未提供密码且无已保存凭据")
 
-        result = run_ssh_command(
-            host=host,
-            port=req.ssh_port,
-            username=req.ssh_user,
-            password=req.ssh_password,
-            command=script.script_content,
-            timeout=script.timeout
+    # 凭据被首次提供 → 持久化保存(下次自动预填)
+    if req.ssh_password and req.ssh_password != cred_service.PWD_MASK:
+        try:
+            cred_service.save_creds(req.ssh_user, req.ssh_password, req.ssh_port)
+        except Exception:
+            pass  # 保存失败不影响执行
+
+    # 合并两种来源：DB 节点 + 手动指定 IP
+    nodes_snapshot = [(n.id, n.hostname, _resolve_host(n)) for n in nodes]
+    for ip in req.target_ips:
+        ip = ip.strip()
+        if ip:
+            nodes_snapshot.append((None, ip, ip))   # id=None，hostname/host 都用 IP
+    if not nodes_snapshot:
+        raise HTTPException(status_code=400, detail="请选择目标节点或填写目标 IP")
+    total = len(nodes_snapshot)
+    script_content = script.script_content
+    script_timeout = script.timeout
+    ssh_user = req.ssh_user
+    ssh_port = req.ssh_port
+
+    async def _stream():
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def _emit(item: dict):
+            return f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+        yield _emit({"type": "start", "total": total, "script_id": script_id, "script_name": script.name})
+
+        async def _run_one(node_id: int, hostname: str, host: Optional[str]):
+            if not host:
+                payload = {
+                    "type": "result",
+                    "node_id": node_id, "hostname": hostname, "host": None,
+                    "success": False, "stdout": "",
+                    "stderr": "节点未配置控制面 IP (ctrl_ip), 无法 SSH",
+                    "exit_code": -1,
+                }
+            else:
+                try:
+                    res = await loop.run_in_executor(
+                        _SSH_EXECUTOR,
+                        run_ssh_command,
+                        host, ssh_port, ssh_user, password,
+                        script_content, script_timeout,
+                    )
+                except Exception as e:
+                    res = {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1}
+                payload = {
+                    "type": "result",
+                    "node_id": node_id, "hostname": hostname, "host": host,
+                    **res,
+                }
+            await queue.put(payload)
+
+        # 所有节点并发起跑
+        for nid, hn, host in nodes_snapshot:
+            asyncio.create_task(_run_one(nid, hn, host))
+
+        # 按完成顺序流式返回
+        success_count = 0
+        for _ in range(total):
+            item = await queue.get()
+            if item.get("success"):
+                success_count += 1
+            yield _emit(item)
+
+        yield _emit({"type": "end", "total": total, "success": success_count})
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+# ─────────────────────────────────────────────
+#  SSH 凭据 (持久化, 仅本机存储)
+# ─────────────────────────────────────────────
+
+class SSHCredsRequest(BaseModel):
+    ssh_user: str = "root"
+    ssh_password: str
+    ssh_port: int = 22
+
+
+@router.get("/ssh-creds")
+def get_ssh_creds():
+    """返回非敏感字段供前端预填; 不返回真实密码"""
+    return cred_service.get_public_info()
+
+
+@router.post("/ssh-creds")
+def update_ssh_creds(req: SSHCredsRequest):
+    """保存 SSH 凭据。空密码视为清除, ******** 视为不修改"""
+    if not req.ssh_password:
+        cred_service.clear_creds()
+        return {"message": "已清除保存的凭据", "has_saved": False}
+    if req.ssh_password == cred_service.PWD_MASK:
+        # 仅修改 user/port, 密码保持不变
+        existing = cred_service.load_creds() or {}
+        cred_service.save_creds(
+            req.ssh_user,
+            existing.get("ssh_password", ""),
+            req.ssh_port,
         )
-        results.append({
-            "node_id": node.id,
-            "hostname": node.hostname,
-            **result
-        })
+    else:
+        cred_service.save_creds(req.ssh_user, req.ssh_password, req.ssh_port)
+    return {"message": "凭据已保存", "has_saved": True}
 
-    return {
-        "script_id": script_id,
-        "script_name": script.name,
-        "results": results
-    }
+
+@router.delete("/ssh-creds")
+def delete_ssh_creds():
+    cred_service.clear_creds()
+    return {"message": "已清除", "has_saved": False}
 
 
 # ─────────────────────────────────────────────

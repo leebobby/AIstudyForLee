@@ -264,9 +264,51 @@ onMounted(() => {
 
 :deep(.el-dialog__header) {
   background: #0f3460;
+  padding: 14px 20px;
+}
+
+:deep(.el-dialog__title) {
+  color: #fff !important;
+  font-weight: 600;
+}
+
+:deep(.el-dialog__headerbtn .el-dialog__close) {
+  color: #fff;
+}
+:deep(.el-dialog__headerbtn:hover .el-dialog__close) {
+  color: #e94560;
 }
 
 :deep(.el-form-item__label) {
+  color: #a0a0a0;
+}
+</style>
+
+<!-- 全局非 scoped 样式: 给被 teleport 到 body 之外的 Element Plus dialog 用 -->
+<style>
+.el-overlay .el-dialog {
+  background: #16213e;
+  color: #fff;
+}
+.el-overlay .el-dialog__header {
+  background: #0f3460;
+  margin-right: 0;
+  padding: 14px 20px;
+}
+.el-overlay .el-dialog__title {
+  color: #fff !important;
+  font-weight: 600;
+}
+.el-overlay .el-dialog__body {
+  color: #fff;
+}
+.el-overlay .el-dialog__headerbtn .el-dialog__close {
+  color: #fff;
+}
+.el-overlay .el-dialog__headerbtn:hover .el-dialog__close {
+  color: #e94560;
+}
+.el-overlay .el-form-item__label {
   color: #a0a0a0;
 }
 </style>

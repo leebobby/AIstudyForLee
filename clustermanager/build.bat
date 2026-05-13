@@ -98,8 +98,9 @@ if not exist %DIST%\iso mkdir %DIST%\iso
 
 popd
 
-echo   -^> copying launcher template (start.bat)
-copy /y build_templates\start.bat backend\dist\cluster-manager\start.bat >nul
+echo   -^> copying launcher templates (start.bat, start-shared.bat)
+copy /y build_templates\start.bat        backend\dist\cluster-manager\start.bat        >nul
+copy /y build_templates\start-shared.bat backend\dist\cluster-manager\start-shared.bat >nul
 
 echo   -^> copying README.txt
 copy /y build_templates\README.txt backend\dist\cluster-manager\README.txt >nul

@@ -339,61 +339,153 @@ class RegenerateRequest(BaseModel):
     acquisition_count: int = 0
 
 
+def _is_placeholder_mac(mac: str) -> bool:
+    """默认模板生成的 MAC 形如 aa:bb:cc:xx:xx:xx, 属于占位符"""
+    return mac.lower().startswith("aa:bb:cc")
+
+
+def _index_by_hostname(data: dict) -> dict:
+    """nodes.json -> {hostname: (mac, node_dict)}; 跳过 _ 开头的元数据键"""
+    result = {}
+    for mac, node in data.items():
+        if mac.startswith("_"):
+            continue
+        hn = node.get("hostname_new", "")
+        if hn:
+            result[hn] = (mac, node)
+    return result
+
+
+def _merge_nodes_json(new_data: dict, old_data: dict) -> dict:
+    """
+    按 hostname 合并新旧 nodes.json (新规划为准):
+      - 同 hostname    : 用旧 MAC (若为真实 MAC), 其余字段用新规划值
+      - 新 hostname    : 直接加入 (用默认占位 MAC)
+      - 旧 hostname 不在新的中 : 删除 (新规划是 source of truth)
+    元数据 (_default_*) 用新的覆盖。
+    """
+    old_by_hn = _index_by_hostname(old_data)
+    merged: dict = {}
+
+    # 1. 元数据从新数据取
+    for k, v in new_data.items():
+        if k.startswith("_"):
+            merged[k] = v
+
+    # 2. 以新数据为主, 按 hostname 找旧条目
+    for new_mac, new_node in new_data.items():
+        if new_mac.startswith("_"):
+            continue
+        hn = new_node.get("hostname_new", "")
+        if hn in old_by_hn:
+            old_mac, _ = old_by_hn[hn]
+            # 旧 MAC 是真实的 (用户填过/PXE 发现过) → 保留; 否则用新的占位
+            use_mac = old_mac if not _is_placeholder_mac(old_mac) else new_mac
+            merged[use_mac] = dict(new_node)
+        else:
+            merged[new_mac] = new_node
+
+    # 旧规划里有但本次不在的 hostname → 不写入 merged, 即被移除
+
+    return merged
+
+
 @router.post("/nodes-json/regenerate")
-def regenerate_nodes_json(req: RegenerateRequest):
-    """按指定节点数量重新生成 nodes.json 模板（MAC 为占位符）"""
-    data = pxe_service_v2._default_nodes_json(
+def regenerate_nodes_json(req: RegenerateRequest, db: Session = Depends(get_db)):
+    """
+    按指定节点数量重新生成 nodes.json。语义为「合并」而非「替换」:
+      - 同 hostname 覆盖 IP 规划字段, 保留已填写的真实 MAC
+      - 新 hostname 追加 (默认占位 MAC)
+      - 旧 hostname 不在本次规划 → 保留不删
+    生成后自动同步到 DB (节点管理页直接可见, 未部署节点显示为离线状态)。
+    """
+    new_data = pxe_service_v2._default_nodes_json(
         master_count=req.master_count,
         slave_count=req.slave_count,
         subswath_count=req.subswath_count,
         gstorage_count=req.gstorage_count,
         acquisition_count=req.acquisition_count,
     )
-    pxe_service_v2.write_nodes_json(data)
-    node_count = sum(1 for k in data if not k.startswith("_"))
-    return {"message": "nodes.json 已重新生成", "node_count": node_count}
+    old_data = pxe_service_v2.read_nodes_json()
+
+    old_hns = set(_index_by_hostname(old_data).keys())
+    new_hns = set(_index_by_hostname(new_data).keys())
+    added_hns   = new_hns - old_hns
+    updated_hns = new_hns & old_hns
+    removed_hns = old_hns - new_hns      # 旧规划里有, 新规划里没有 → 本次将删除
+
+    merged = _merge_nodes_json(new_data, old_data)
+    pxe_service_v2.write_nodes_json(merged)
+
+    # 顺手同步 DB, 让节点管理立即可见
+    db_stats = _sync_nodes_json_to_db_impl(db)
+
+    return {
+        "message": (
+            f"nodes.json 已更新: 新增 {len(added_hns)} / 更新 {len(updated_hns)} / "
+            f"删除 {len(removed_hns)} (节点管理: 新建 {db_stats['created']} 离线 / "
+            f"删除 {db_stats['deleted']})"
+        ),
+        "added":   sorted(added_hns),
+        "updated": sorted(updated_hns),
+        "removed": sorted(removed_hns),
+        "db":      db_stats,
+    }
 
 
-@router.post("/nodes-json/sync-to-db")
-def sync_nodes_json_to_db(db: Session = Depends(get_db)):
-    """将 nodes.json 同步到 DB 节点表，使组网图数据与规划保持一致"""
+def _sync_nodes_json_to_db_impl(db: Session) -> dict:
+    """
+    将 nodes.json 中的节点 upsert 到 DB:
+      - 新节点 → 创建，status=offline
+      - 已存在节点 → 仅更新规划字段（IP/MAC/role），不改状态
+    不删除任何节点，删除操作由用户在「节点管理」手动执行。
+    """
     nodes_json = pxe_service_v2.read_nodes_json()
-    synced = 0
+    created = updated = 0
+
     for mac, node in nodes_json.items():
         if mac.startswith("_"):
             continue
         hostname = node.get("hostname_new", "")
         if not hostname:
             continue
-        role = node.get("role", "slave")
-        ctrl_ip = node.get("ctrl_ip", "").split("/")[0]
-        bmc_ip = node.get("bmc_ip", "")
-        rdma_ips = node.get("rdma_ips", "")
+        role      = node.get("role", "slave")
+        ctrl_ip   = node.get("ctrl_ip",   "").split("/")[0]
+        bmc_ip    = node.get("bmc_ip",    "")
+        rdma_ips  = node.get("rdma_ips",  "")
         first_rdma_ip = rdma_ips.split()[0].split("/")[0] if rdma_ips else ""
 
         existing = db.query(Node).filter(Node.hostname == hostname).first()
         if existing:
-            existing.ctrl_ip  = ctrl_ip
+            if ctrl_ip:   existing.ctrl_ip   = ctrl_ip
             existing.ctrl_mac = mac
-            existing.mgmt_ip  = bmc_ip
-            existing.bmc_ip   = bmc_ip
-            existing.data_ip  = first_rdma_ip
+            if bmc_ip:    existing.mgmt_ip   = bmc_ip
+            if bmc_ip:    existing.bmc_ip    = bmc_ip
+            if first_rdma_ip: existing.data_ip = first_rdma_ip
             existing.node_type = role
+            # status/ctrl_status/data_status 保留原值
+            updated += 1
         else:
             db.add(Node(
-                hostname=hostname,
-                node_type=role,
-                role=role,
-                ctrl_ip=ctrl_ip,
-                ctrl_mac=mac,
-                mgmt_ip=bmc_ip,
-                bmc_ip=bmc_ip,
-                data_ip=first_rdma_ip,
-                status="offline",
+                hostname=hostname, node_type=role, role=role,
+                ctrl_ip=ctrl_ip, ctrl_mac=mac,
+                mgmt_ip=bmc_ip, bmc_ip=bmc_ip, data_ip=first_rdma_ip,
+                status="offline", ctrl_status="offline", data_status="offline",
             ))
-        synced += 1
+            created += 1
+
     db.commit()
-    return {"message": f"已同步 {synced} 个节点到数据库"}
+    return {"created": created, "updated": updated, "deleted": 0}
+
+
+@router.post("/nodes-json/sync-to-db")
+def sync_nodes_json_to_db(db: Session = Depends(get_db)):
+    """将 nodes.json 同步到 DB 节点表 (上游通常已由 regenerate 自动调用, 此端点为手动入口)"""
+    stats = _sync_nodes_json_to_db_impl(db)
+    return {
+        "message": f"已同步 (新建 {stats['created']} 离线, 更新 {stats['updated']} 保留状态)",
+        **stats,
+    }
 
 
 class NodeFieldsUpdate(BaseModel):

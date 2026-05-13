@@ -41,16 +41,16 @@
               <el-input-number v-model="planForm.acquisition_count" :min="0" :max="20" />
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" @click="generatePlan" :loading="planning">
-                生成规划
-              </el-button>
               <el-button
                 type="success"
-                :disabled="!ipPlanResult"
+                size="default"
                 @click="applyPlanToNodesJson"
-                :loading="applyingPlan"
+                :loading="applyingPlan || planning"
               >
-                应用到 nodes.json
+                应用规划 (保存到 nodes.json + 节点管理)
+              </el-button>
+              <el-button @click="generatePlan" :loading="planning" plain>
+                仅预览
               </el-button>
             </el-form-item>
           </el-form>
@@ -59,8 +59,16 @@
         <!-- 规划结果 -->
         <template v-if="ipPlanResult">
           <el-alert
+            v-if="planSaved"
             type="success"
-            :title="`共 ${ipPlanResult.total_nodes} 个节点（含 PXE Host）`"
+            :title="`已保存到 nodes.json,共 ${ipPlanResult.total_nodes} 个节点(含 PXE Host)。节点管理已同步,未部署节点显示为离线。`"
+            :closable="false"
+            style="margin:12px 0"
+          />
+          <el-alert
+            v-else
+            type="warning"
+            :title="`预览: 共 ${ipPlanResult.total_nodes} 个节点(含 PXE Host)。当前未保存,点击上方【应用规划】写入 nodes.json。`"
             :closable="false"
             style="margin:12px 0"
           />
@@ -954,7 +962,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Search, Clock, Plus, Minus, Edit, CaretRight } from '@element-plus/icons-vue'
@@ -967,13 +975,18 @@ const planForm = ref({ master_count: 6, slave_count: 12, subswath_count: 2, gsto
 const ipPlanResult = ref(null)
 const planning = ref(false)
 const applyingPlan = ref(false)
+const planSaved = ref(false)        // true = ipPlanResult 对应的内容已写入 nodes.json
+
+// 用户改任意 count → 当前预览/已存状态都失效, 需要重新预览或重新应用
+watch(planForm, () => { planSaved.value = false }, { deep: true })
 
 async function generatePlan() {
   planning.value = true
   try {
     const res = await axios.post('/api/pxe/network-plan', planForm.value)
     ipPlanResult.value = res.data
-    ElMessage.success(`规划已生成，共 ${res.data.total_nodes} 个节点`)
+    planSaved.value = false         // 仅预览, 未保存
+    ElMessage.info(`已生成预览, 共 ${res.data.total_nodes} 个节点。点击【应用规划】写入 nodes.json。`)
   } catch (e) {
     ElMessage.error('规划生成失败: ' + e.message)
   } finally {
@@ -982,26 +995,47 @@ async function generatePlan() {
 }
 
 async function applyPlanToNodesJson() {
+  const summary = `Master×${planForm.value.master_count} / Slave×${planForm.value.slave_count} / SubSwath×${planForm.value.subswath_count} / GStorage×${planForm.value.gstorage_count} / Acquisition×${planForm.value.acquisition_count}`
   try {
     await ElMessageBox.confirm(
-      `将按当前规划数量（Master×${planForm.value.master_count} / Slave×${planForm.value.slave_count} / SubSwath×${planForm.value.subswath_count} / GStorage×${planForm.value.gstorage_count} / Acquisition×${planForm.value.acquisition_count}）重新生成 nodes.json 模板，并同步到组网图。确认继续？`,
+      `将按当前规划保存到 nodes.json: ${summary}\n\n规则:\n` +
+      `- 同名节点保留已填写的真实 MAC, IP 字段按本次规划重算\n` +
+      `- 新增节点追加 (默认占位 MAC)\n` +
+      `- 旧规划中存在但本次不在的节点将被删除 (新规划为 source of truth)\n` +
+      `- 节点管理同步: 新增节点离线显示; 手动添加的节点不受影响`,
       '确认应用规划',
-      { type: 'warning' }
+      { type: 'warning', confirmButtonText: '确认应用', cancelButtonText: '取消' }
     )
   } catch {
     return
   }
   applyingPlan.value = true
   try {
-    // 1. 按规划数量重新生成 nodes.json
-    await axios.post('/api/pxe/nodes-json/regenerate', planForm.value)
-    // 2. 同步到 DB，更新组网图
-    await axios.post('/api/pxe/nodes-json/sync-to-db')
-    ElMessage.success('nodes.json 已重新生成，组网图已同步')
+    // Step1: regenerate 写入 nodes.json
+    const { data } = await axios.post('/api/pxe/nodes-json/regenerate', planForm.value)
+
+    // Step2: 显式再 sync 一次，确保节点管理页数据与 nodes.json 保持一致
+    const syncRes = await axios.post('/api/pxe/nodes-json/sync-to-db')
+    const dbCreated = syncRes.data?.created ?? data.db?.created ?? 0
+
+    // 刷新预览
+    try {
+      const planRes = await axios.post('/api/pxe/network-plan', planForm.value)
+      ipPlanResult.value = planRes.data
+    } catch { /* ignore */ }
+    planSaved.value = true
+
+    const added   = data.added?.length   ?? 0
+    const updated = data.updated?.length ?? 0
+    const removed = data.removed?.length ?? 0
+    ElMessage.success(
+      `已保存: 新增 ${added} / 更新 ${updated} / 删除 ${removed}。` +
+      `节点管理新建 ${dbCreated} 个离线节点，请切换到「节点管理」页查看。`
+    )
     await loadNodeList()
     activeTab.value = 'nodes'
   } catch (e) {
-    ElMessage.error('应用失败: ' + e.message)
+    ElMessage.error('应用失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     applyingPlan.value = false
   }

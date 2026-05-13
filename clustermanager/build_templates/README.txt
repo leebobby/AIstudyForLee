@@ -2,9 +2,17 @@ Cluster Manager - Windows 桌面 App
 ============================================
 
 [使用方式]
-  1. 双击 cluster-manager.exe (或 start.bat) 启动
+  1. 双击 cluster-manager.exe (或 start.bat) 启动 - 仅本机访问
   2. 自动弹出原生应用窗口, 标题 "Cluster Manager"
   3. 关闭窗口即停止服务
+
+[局域网共享模式]
+  双击 start-shared.bat 启动 (而非 start.bat)。后端绑定 0.0.0.0,
+  局域网其他机器可在浏览器访问 http://<本机IP>:8000。
+  窗口标题会显示可用的局域网 URL, 直接转发给同事即可。
+  - 本机仍然弹出桌面窗口
+  - 不分享时使用普通的 start.bat 即可
+  - 也可手动设环境变量: set CLUSTER_MANAGER_BIND=0.0.0.0
 
 [环境要求]
   - Windows 10 / 11 x64
@@ -20,8 +28,10 @@ Cluster Manager - Windows 桌面 App
   pxe_data\                  nodes.json 等运行时数据 (首次启动自动生成)
   cluster_manager.db         SQLite 数据库 (首次启动自动生成)
   scripts_bundle.json        诊断脚本发布包 (可选, 新环境首次启动自动加载)
+  ssh_credentials.json       已保存的 SSH 凭据 (首次成功执行后自动生成, 含明文密码)
   cluster_manager.log        运行日志 (无控制台窗口下排错的唯一入口)
-  start.bat                  启动器 (等价于双击 EXE)
+  start.bat                  本机访问启动器 (推荐)
+  start-shared.bat           局域网共享启动器 (绑定 0.0.0.0)
 
 [网络要求]
   本 Windows 主机必须同时可达:
@@ -36,7 +46,7 @@ Cluster Manager - Windows 桌面 App
   4. PXE Host 装机完成后, 执行第一/二/三批节点部署
 
 [更新部署]
-  保留 cluster_manager.db / pxe_data\ / iso\ / scripts_bundle.json
+  保留 cluster_manager.db / pxe_data\ / iso\ / scripts_bundle.json / ssh_credentials.json
   覆盖 cluster-manager.exe / _internal\ / static\ 即可。
 
 [端口冲突]

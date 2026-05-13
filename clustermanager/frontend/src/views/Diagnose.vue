@@ -314,42 +314,73 @@
       width="780px"
       @closed="runResults = []"
     >
-      <el-form :model="runForm" inline label-width="70px" class="run-form">
-        <el-form-item label="目标节点">
+      <el-form :model="runForm" label-width="80px" class="run-form-block">
+        <!-- 模式切换 -->
+        <el-form-item label="目标方式">
+          <el-radio-group v-model="runForm.target_mode" size="small">
+            <el-radio-button value="ips">手动 IP</el-radio-button>
+            <el-radio-button value="nodes">节点选择</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+
+        <!-- 目标值 -->
+        <el-form-item :label="runForm.target_mode === 'ips' ? '目标 IP' : '目标节点'">
+          <el-input
+            v-if="runForm.target_mode === 'ips'"
+            v-model="runForm.manual_ips"
+            style="width:360px"
+            placeholder="172.16.3.100（多个用英文逗号分隔）"
+          />
           <el-select
+            v-else
             v-model="runForm.node_ids" multiple collapse-tags
-            style="width:230px" placeholder="选择节点"
+            style="width:360px" placeholder="选择节点（含离线）"
           >
             <el-option
               v-for="n in nodes" :key="n.id"
-              :label="`${n.hostname} (${n.mgmt_ip || '无IP'})`" :value="n.id"
+              :label="`${n.hostname} (${n.ctrl_ip || n.mgmt_ip || '无IP'}) [${n.status}]`"
+              :value="n.id"
             />
           </el-select>
+          <div v-if="runForm.target_mode === 'ips'" class="run-ip-hint">
+            SSH 将直接连到此 IP, 不依赖节点管理
+          </div>
         </el-form-item>
-        <el-form-item label="用户名">
-          <el-input v-model="runForm.ssh_user" placeholder="root" style="width:90px" />
-        </el-form-item>
-        <el-form-item label="密码">
-          <el-input v-model="runForm.ssh_password" type="password" show-password style="width:120px" />
-        </el-form-item>
-        <el-form-item label="端口">
-          <el-input-number v-model="runForm.ssh_port" :min="1" :max="65535" style="width:85px" />
+
+        <!-- 凭据 + 端口 -->
+        <el-form-item label="SSH 凭据">
+          <el-input v-model="runForm.ssh_user" placeholder="用户名" style="width:120px" />
+          <el-input v-model="runForm.ssh_password" type="password" show-password
+                    placeholder="密码" style="width:160px;margin-left:8px" />
+          <el-input v-model.number="runForm.ssh_port" type="number" min="1" max="65535"
+                    placeholder="端口" style="width:90px;margin-left:8px" />
         </el-form-item>
       </el-form>
 
       <pre class="script-preview">{{ runDialog.script?.script_content }}</pre>
 
-      <el-button
-        type="primary" :loading="running"
-        @click="executeScript" :disabled="!runForm.node_ids.length"
-        style="margin-bottom:14px"
-      >
-        <el-icon><VideoPlay /></el-icon>&nbsp;执行
-      </el-button>
+      <div class="run-action-bar">
+        <el-button
+          type="primary" :loading="running"
+          @click="executeScript"
+          :disabled="runForm.target_mode === 'nodes' ? !runForm.node_ids.length : !runForm.manual_ips.trim()"
+        >
+          <el-icon><VideoPlay /></el-icon>&nbsp;执行
+        </el-button>
+        <el-tag v-if="credsLoaded" size="small" type="success">
+          已保存凭据 ({{ runForm.ssh_user }})
+        </el-tag>
+        <span v-if="runProgress.total" class="run-progress">
+          已完成 {{ runResults.length }} / {{ runProgress.total }}
+        </span>
+      </div>
 
       <div v-for="res in runResults" :key="res.node_id" class="run-result">
         <div class="run-result-title">
-          <span>{{ res.hostname }}</span>
+          <span>
+            {{ res.hostname }}
+            <span class="run-host">{{ res.host || '—' }}</span>
+          </span>
           <el-tag size="small" :type="res.success ? 'success' : 'danger'">exit {{ res.exit_code }}</el-tag>
         </div>
         <pre class="run-stdout">{{ res.stdout || '(无输出)' }}</pre>
@@ -501,33 +532,121 @@ async function confirmDelete(script) {
   }
 }
 
-// ─── 运行脚本 ───
+// ─── 运行脚本 (流式 SSE + 凭据持久化) ───
+const PWD_MASK = '********'
 const runDialog = ref({ visible: false, script: null })
-const runForm = ref({ node_ids: [], ssh_user: 'root', ssh_password: '', ssh_port: 22 })
+const runForm = ref({
+  target_mode: 'ips',           // 默认手动 IP 模式（无在线节点时也能用）
+  node_ids: [],
+  manual_ips: '172.16.3.100',   // 默认控制面 IP
+  ssh_user: 'root',
+  ssh_password: '',
+  ssh_port: 22,
+})
 const running = ref(false)
 const runResults = ref([])
+const runProgress = ref({ total: 0 })
+const credsLoaded = ref(false)
+
+// 只有 status === 'online' 的节点可作为脚本执行目标 (SSH 走 ctrl_ip)
+const onlineNodes = computed(() => nodes.value.filter(n => n.status === 'online'))
+
+async function loadSavedCreds() {
+  try {
+    const res = await axios.get('/api/diagnose/ssh-creds')
+    if (res.data.has_saved) {
+      runForm.value.ssh_user = res.data.ssh_user || 'root'
+      runForm.value.ssh_port = res.data.ssh_port || 22
+      runForm.value.ssh_password = PWD_MASK    // 占位符, 提交时后端会用已保存的真密码
+      credsLoaded.value = true
+    } else {
+      credsLoaded.value = false
+    }
+  } catch {
+    credsLoaded.value = false
+  }
+}
 
 function openRunDialog(script) {
   runDialog.value = { visible: true, script }
   runResults.value = []
+  runProgress.value = { total: 0 }
+  loadSavedCreds()
+  loadNodes()        // 拉最新节点状态, 仅在线节点可选
 }
 
 async function executeScript() {
-  if (!runForm.value.node_ids.length) { ElMessage.warning('请选择节点'); return }
+  // 构造请求体：按模式取 node_ids 或 target_ips
+  const payload = {
+    node_ids: runForm.value.target_mode === 'nodes' ? runForm.value.node_ids : [],
+    target_ips: runForm.value.target_mode === 'ips'
+      ? runForm.value.manual_ips.split(',').map(s => s.trim()).filter(Boolean)
+      : [],
+    ssh_user: runForm.value.ssh_user,
+    ssh_password: runForm.value.ssh_password,
+    ssh_port: Number(runForm.value.ssh_port) || 22,
+  }
+  if (!payload.node_ids.length && !payload.target_ips.length) {
+    ElMessage.warning('请选择节点或填写目标 IP')
+    return
+  }
   running.value = true
   runResults.value = []
+  runProgress.value = { total: 0 }
+
   try {
-    const res = await axios.post(
-      `/api/diagnose/scripts/${runDialog.value.script.id}/run`,
-      runForm.value
-    )
-    runResults.value = res.data.results
-    const ok = runResults.value.filter(r => r.success).length
-    ElMessage[ok === runResults.value.length ? 'success' : 'warning'](
-      `执行完成: ${ok}/${runResults.value.length} 个节点成功`
-    )
+    const resp = await fetch(`/api/diagnose/scripts/${runDialog.value.script.id}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!resp.ok) {
+      let detail = `HTTP ${resp.status}`
+      try { detail = (await resp.json()).detail || detail } catch {}
+      throw new Error(detail)
+    }
+
+    // 解析 SSE 数据流: 每事件 `data: {...}\n\n`
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let endEvent = null
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const chunk = buf.slice(0, idx).trim()
+        buf = buf.slice(idx + 2)
+        if (!chunk.startsWith('data:')) continue
+        const json = chunk.replace(/^data:\s*/, '')
+        if (!json) continue
+        let evt
+        try { evt = JSON.parse(json) } catch { continue }
+
+        if (evt.type === 'start') {
+          runProgress.value = { total: evt.total }
+        } else if (evt.type === 'result') {
+          runResults.value.push(evt)        // 增量追加, 实时显示
+        } else if (evt.type === 'end') {
+          endEvent = evt
+        }
+      }
+    }
+
+    const total = endEvent?.total ?? runResults.value.length
+    const ok = endEvent?.success ?? runResults.value.filter(r => r.success).length
+    ElMessage[ok === total ? 'success' : 'warning'](`执行完成: ${ok}/${total} 个节点成功`)
+
+    // 凭据持久化: 仅当用户实际输入了新密码时, 后端会自动保存
+    // 这里再拉一次状态以更新标签
+    if (runForm.value.ssh_password && runForm.value.ssh_password !== PWD_MASK) {
+      loadSavedCreds()
+    }
   } catch (e) {
-    ElMessage.error(e.response?.data?.detail || '执行失败')
+    ElMessage.error(e.message || '执行失败')
   } finally {
     running.value = false
   }
@@ -640,6 +759,8 @@ async function loadNodes() {
     nodes.value = res.data
   } catch { /* ignore */ }
 }
+
+// 打开运行对话框前刷新一次节点状态, 避免列表里出现已离线的旧节点
 
 onMounted(() => {
   loadScripts()
@@ -808,6 +929,45 @@ onMounted(() => {
 
 /* ─── 运行对话框 ─── */
 .run-form { flex-wrap: wrap; gap: 4px; }
+.run-form-block { width: 100%; }
+.run-form-block :deep(.el-form-item) { margin-bottom: 12px; }
+.run-ip-hint {
+  font-size: 11px;
+  color: #8b949e;
+  margin-top: 4px;
+}
+.run-form-block :deep(.el-radio-button__inner) {
+  background: #0f3460;
+  border-color: #1e4080;
+  color: #8b949e;
+}
+.run-form-block :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: #e94560;
+  border-color: #e94560;
+  color: #fff;
+}
+
+.run-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.run-progress {
+  color: #8b949e;
+  font-size: 12px;
+}
+.run-host {
+  color: #8b949e;
+  font-size: 11px;
+  font-family: Consolas, monospace;
+  margin-left: 8px;
+}
+.run-empty-hint {
+  color: #e0a64b;
+  font-size: 11px;
+  margin-left: 8px;
+}
 .script-preview {
   background: #0d1117;
   color: #8b949e;

@@ -30,6 +30,8 @@ backend/iso/
 # nodes.json / pxe_host.json 含敏感信息(MAC / BMC 凭据)
 backend/pxe_data/
 backend/pxe_host.json
+# SSH 凭据 (含明文密码), 仅本地运行时持久化
+backend/ssh_credentials.json
 
 # ── 发布产物 ────────────────────────────────────────────────
 cluster-manager-windows.zip
