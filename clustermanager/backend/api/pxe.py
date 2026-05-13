@@ -440,42 +440,77 @@ def _sync_nodes_json_to_db_impl(db: Session) -> dict:
       - 已存在节点 → 仅更新规划字段（IP/MAC/role），不改状态
     不删除任何节点，删除操作由用户在「节点管理」手动执行。
     """
+    import logging
+    log = logging.getLogger("pxe.sync")
+
     nodes_json = pxe_service_v2.read_nodes_json()
-    created = updated = 0
+    created_list: list = []
+    updated_list: list = []
+    skipped_list: list = []
+
+    log.info(f"[sync] nodes.json 共 {len(nodes_json)} 个键 (含元数据)")
+    print(f"[sync] nodes.json 共 {len(nodes_json)} 个键")
 
     for mac, node in nodes_json.items():
         if mac.startswith("_"):
             continue
-        hostname = node.get("hostname_new", "")
+        if not isinstance(node, dict):
+            skipped_list.append(f"{mac}(非dict)")
+            continue
+        hostname = node.get("hostname_new") or ""
         if not hostname:
+            skipped_list.append(f"{mac}(无hostname_new)")
             continue
         role      = node.get("role", "slave")
-        ctrl_ip   = node.get("ctrl_ip",   "").split("/")[0]
-        bmc_ip    = node.get("bmc_ip",    "")
-        rdma_ips  = node.get("rdma_ips",  "")
+        ctrl_ip   = (node.get("ctrl_ip") or "").split("/")[0]
+        bmc_ip    = node.get("bmc_ip") or ""
+        rdma_ips  = node.get("rdma_ips") or ""
         first_rdma_ip = rdma_ips.split()[0].split("/")[0] if rdma_ips else ""
 
-        existing = db.query(Node).filter(Node.hostname == hostname).first()
-        if existing:
-            if ctrl_ip:   existing.ctrl_ip   = ctrl_ip
-            existing.ctrl_mac = mac
-            if bmc_ip:    existing.mgmt_ip   = bmc_ip
-            if bmc_ip:    existing.bmc_ip    = bmc_ip
-            if first_rdma_ip: existing.data_ip = first_rdma_ip
-            existing.node_type = role
-            # status/ctrl_status/data_status 保留原值
-            updated += 1
-        else:
-            db.add(Node(
-                hostname=hostname, node_type=role, role=role,
-                ctrl_ip=ctrl_ip, ctrl_mac=mac,
-                mgmt_ip=bmc_ip, bmc_ip=bmc_ip, data_ip=first_rdma_ip,
-                status="offline", ctrl_status="offline", data_status="offline",
-            ))
-            created += 1
+        try:
+            existing = db.query(Node).filter(Node.hostname == hostname).first()
+            if existing:
+                if ctrl_ip:        existing.ctrl_ip = ctrl_ip
+                existing.ctrl_mac = mac
+                if bmc_ip:         existing.mgmt_ip = bmc_ip
+                if bmc_ip:         existing.bmc_ip  = bmc_ip
+                if first_rdma_ip:  existing.data_ip = first_rdma_ip
+                existing.node_type = role
+                updated_list.append(hostname)
+            else:
+                db.add(Node(
+                    hostname=hostname, node_type=role, role=role,
+                    ctrl_ip=ctrl_ip, ctrl_mac=mac,
+                    mgmt_ip=bmc_ip, bmc_ip=bmc_ip, data_ip=first_rdma_ip,
+                    status="offline", ctrl_status="offline", data_status="offline",
+                ))
+                created_list.append(hostname)
+        except Exception as e:
+            log.exception(f"[sync] {hostname} 失败: {e}")
+            print(f"[sync][error] {hostname}: {e}")
+            skipped_list.append(f"{hostname}(异常:{e})")
 
-    db.commit()
-    return {"created": created, "updated": updated, "deleted": 0}
+    try:
+        db.commit()
+    except Exception as e:
+        log.exception(f"[sync] commit 失败: {e}")
+        print(f"[sync][commit error] {e}")
+        db.rollback()
+        raise
+
+    total_in_db = db.query(Node).count()
+    print(f"[sync] OK: created={len(created_list)} updated={len(updated_list)} skipped={len(skipped_list)} db_total={total_in_db}")
+    log.info(f"[sync] OK: created={len(created_list)} updated={len(updated_list)} db_total={total_in_db}")
+
+    return {
+        "created": len(created_list),
+        "updated": len(updated_list),
+        "deleted": 0,
+        "skipped": skipped_list,
+        "created_hostnames": created_list,
+        "updated_hostnames": updated_list,
+        "db_total": total_in_db,
+    }
 
 
 @router.post("/nodes-json/sync-to-db")

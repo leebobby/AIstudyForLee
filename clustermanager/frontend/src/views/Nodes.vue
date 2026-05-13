@@ -22,6 +22,9 @@
               <el-icon><Refresh /></el-icon>
               刷新
             </el-button>
+            <el-button type="warning" @click="forceSyncFromJson" :loading="syncing">
+              从规划重新同步
+            </el-button>
             <el-button type="success" @click="openAdd">
               <el-icon><Plus /></el-icon>
               新增节点
@@ -403,6 +406,29 @@ const loadNodes = async () => {
     nodes.value = response.data
   } catch (e) {
     ElMessage.error('获取节点列表失败')
+  }
+}
+
+// 从 pxe_data/nodes.json 强制同步到 DB (作为 IP 规划落库的应急/手动入口)
+const syncing = ref(false)
+const forceSyncFromJson = async () => {
+  syncing.value = true
+  try {
+    const res = await axios.post('/api/pxe/nodes-json/sync-to-db')
+    const d = res.data || {}
+    ElMessage.success(
+      `同步完成: 新建 ${d.created || 0} / 更新 ${d.updated || 0}, ` +
+      `数据库共 ${d.db_total || 0} 个节点`
+    )
+    if (d.skipped && d.skipped.length) {
+      console.warn('[sync] 跳过的条目:', d.skipped)
+      ElMessage.warning(`有 ${d.skipped.length} 个条目被跳过, 详见控制台`)
+    }
+    await loadNodes()
+  } catch (e) {
+    ElMessage.error('同步失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    syncing.value = false
   }
 }
 

@@ -1013,10 +1013,17 @@ async function applyPlanToNodesJson() {
   try {
     // Step1: regenerate 写入 nodes.json
     const { data } = await axios.post('/api/pxe/nodes-json/regenerate', planForm.value)
+    console.log('[apply] regenerate response:', data)
 
     // Step2: 显式再 sync 一次，确保节点管理页数据与 nodes.json 保持一致
     const syncRes = await axios.post('/api/pxe/nodes-json/sync-to-db')
-    const dbCreated = syncRes.data?.created ?? data.db?.created ?? 0
+    const syncData = syncRes.data || {}
+    console.log('[apply] sync-to-db response:', syncData)
+    const dbCreated = syncData.created ?? 0
+    const dbUpdated = syncData.updated ?? 0
+    const dbTotal   = syncData.db_total ?? 0
+    const skipped   = syncData.skipped || []
+    if (skipped.length) console.warn('[apply] 跳过条目:', skipped)
 
     // 刷新预览
     try {
@@ -1029,12 +1036,16 @@ async function applyPlanToNodesJson() {
     const updated = data.updated?.length ?? 0
     const removed = data.removed?.length ?? 0
     ElMessage.success(
-      `已保存: 新增 ${added} / 更新 ${updated} / 删除 ${removed}。` +
-      `节点管理新建 ${dbCreated} 个离线节点，请切换到「节点管理」页查看。`
+      `nodes.json: 新增 ${added} / 更新 ${updated} / 删除 ${removed}。` +
+      `节点管理: 新建 ${dbCreated} / 更新 ${dbUpdated}, 当前 DB 共 ${dbTotal} 个节点。`
     )
+    if (skipped.length) {
+      ElMessage.warning(`有 ${skipped.length} 条记录被跳过未同步, 详见浏览器控制台 [apply] 跳过条目`)
+    }
     await loadNodeList()
     activeTab.value = 'nodes'
   } catch (e) {
+    console.error('[apply] 失败:', e.response?.data || e)
     ElMessage.error('应用失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     applyingPlan.value = false
