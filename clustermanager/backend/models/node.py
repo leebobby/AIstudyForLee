@@ -194,12 +194,16 @@ class DiagScript(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(100))
     description = Column(Text, default='')
-    script_tab = Column(String(20), default='hardware')   # business / hardware
+    script_tab = Column(String(20), default='hardware')   # business / hardware / log_export
     category = Column(String(50), default='通用诊断')
     script_content = Column(Text)           # SSH命令或脚本内容
     target_node_type = Column(String(20), default='all')  # all/master/slave/sensor
     timeout = Column(Integer, default=30)   # 超时秒数
     enabled = Column(Boolean, default=True)
+    # 日志导出场景: stdout = 脚本 stdout 落成一个文件 (默认);
+    #              files  = 脚本 stdout 是一行一个的远端绝对路径, 后端 SFTP 全文件下载
+    # business/hardware 类型脚本固定 stdout 即可, 不会被读到
+    output_mode = Column(String(20), default='stdout')
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 

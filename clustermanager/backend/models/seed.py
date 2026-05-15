@@ -15,9 +15,26 @@ from .node import (
 )
 
 
+_DEFAULT_LOG_EXPORT_SEEDS = []   # 在下方默认脚本列表构造完成后填充
+
+
+def _seed_log_export_if_missing(db: Session):
+    """单独补 log_export 脚本: 旧 DB 已有 business/hardware 脚本但缺日志导出种子时使用"""
+    if db.query(DiagScript).filter(DiagScript.script_tab == "log_export").count() > 0:
+        return
+    if not _DEFAULT_LOG_EXPORT_SEEDS:
+        return
+    for s in _DEFAULT_LOG_EXPORT_SEEDS:
+        db.add(DiagScript(**s))
+    db.commit()
+    print(f"  - 补全 {len(_DEFAULT_LOG_EXPORT_SEEDS)} 个日志导出脚本")
+
+
 def _seed_diag_scripts(db: Session):
     """生成诊断脚本：优先从 scripts_bundle.json 加载，否则写入内置默认脚本"""
     if db.query(DiagScript).count() > 0:
+        # 旧 DB 也补一次日志导出种子, 让 Tab3 可用
+        _seed_log_export_if_missing(db)
         return
 
     # ── 尝试从发布包加载 ─────────────────────────────────────────
@@ -190,12 +207,193 @@ def _seed_diag_scripts(db: Session):
                    description="查看最近200条系统日志",
                    script_content="journalctl -n 200 --no-pager 2>/dev/null || tail -200 /var/log/messages",
                    target_node_type="all", timeout=15),
+
+        # ── 日志导出 (log_export): 每条脚本的 stdout 会落盘成一个 .log 文件 ──
+        #   可在脚本里用 $ALERT_TIME / $ALERT_FROM / $ALERT_TO 做时间窗过滤
+        DiagScript(script_tab="log_export", category="business",
+                   name="业务-应用日志",
+                   description="导出业务进程相关日志, 默认抓 /var/log/app/ 目录",
+                   script_content=(
+                       "if [ -n \"$ALERT_FROM\" ]; then\n"
+                       "  find /var/log/app -type f -newermt \"$ALERT_FROM\" ! -newermt \"$ALERT_TO\" "
+                           "-exec tail -n +1 {} + 2>/dev/null\n"
+                       "else\n"
+                       "  tail -n 500 /var/log/app/*.log 2>/dev/null || echo '无应用日志'\n"
+                       "fi"
+                   ),
+                   target_node_type="all", timeout=60),
+
+        DiagScript(script_tab="log_export", category="system",
+                   name="系统-journalctl",
+                   description="按时间窗导出 systemd journal",
+                   script_content=(
+                       "if [ -n \"$ALERT_FROM\" ]; then\n"
+                       "  journalctl --since=\"$ALERT_FROM\" --until=\"$ALERT_TO\" --no-pager\n"
+                       "else\n"
+                       "  journalctl -n 1000 --no-pager\n"
+                       "fi"
+                   ),
+                   target_node_type="all", timeout=60),
+
+        DiagScript(script_tab="log_export", category="system",
+                   name="系统-messages",
+                   description="导出 /var/log/messages",
+                   script_content=(
+                       "if [ -n \"$ALERT_FROM\" ]; then\n"
+                       "  awk -v from=\"$ALERT_FROM\" -v to=\"$ALERT_TO\" "
+                           "'$0 >= from && $0 <= to' /var/log/messages 2>/dev/null\n"
+                       "else\n"
+                       "  tail -n 2000 /var/log/messages 2>/dev/null\n"
+                       "fi"
+                   ),
+                   target_node_type="all", timeout=60),
+
+        DiagScript(script_tab="log_export", category="kernel",
+                   name="内核-dmesg",
+                   description="导出 dmesg 内核日志",
+                   script_content=(
+                       "if [ -n \"$ALERT_FROM\" ]; then\n"
+                       "  dmesg --since=\"$ALERT_FROM\" --until=\"$ALERT_TO\" 2>/dev/null "
+                           "|| dmesg -T\n"
+                       "else\n"
+                       "  dmesg -T 2>/dev/null || dmesg\n"
+                       "fi"
+                   ),
+                   target_node_type="all", timeout=30),
+
+        DiagScript(script_tab="log_export", category="network",
+                   name="网络-接口状态",
+                   description="导出网卡链路/IP/路由/统计快照",
+                   script_content=(
+                       "echo '=== ip link ===' && ip -s link show\n"
+                       "echo '=== ip addr ===' && ip addr show\n"
+                       "echo '=== ip route ===' && ip route show\n"
+                       "echo '=== ss -s ==='   && ss -s\n"
+                   ),
+                   target_node_type="all", timeout=30),
+
+        DiagScript(script_tab="log_export", category="network",
+                   name="网络-RDMA/DPDK",
+                   description="导出 RDMA / DPDK 相关日志",
+                   script_content=(
+                       "echo '=== ibstat ===' && (ibstat 2>/dev/null || echo 'no RDMA')\n"
+                       "echo '=== rdma link ===' && (rdma link show 2>/dev/null || true)\n"
+                       "echo '=== dpdk-devbind ===' "
+                           "&& (dpdk-devbind.py --status 2>/dev/null || echo 'no DPDK')\n"
+                   ),
+                   target_node_type="all", timeout=30),
+
+        # ── files 模式样例: 输出路径清单 → SFTP 完整下载, 避免筛选命令漏日志 ──
+        DiagScript(script_tab="log_export", category="business", output_mode="files",
+                   name="业务-完整日志文件 (files)",
+                   description="files 模式: 脚本 stdout 是待下载的绝对路径列表, 后端 SFTP 完整拉回, "
+                               "不被 50KB 截断, 适合需要完整保留日志的场景",
+                   script_content=(
+                       "# 输出模式 = files, 这里每输出一行 = 待 SFTP 下载的远端绝对路径\n"
+                       "# 空行和 # 开头的注释会被忽略\n"
+                       "if [ -n \"$ALERT_FROM\" ]; then\n"
+                       "  find /var/log/app -maxdepth 2 -name '*.log*' -type f \\\n"
+                       "       -newermt \"$ALERT_FROM\" ! -newermt \"$ALERT_TO\" 2>/dev/null\n"
+                       "else\n"
+                       "  ls /var/log/app/*.log* 2>/dev/null\n"
+                       "fi"
+                   ),
+                   target_node_type="all", timeout=120),
+
+        DiagScript(script_tab="log_export", category="system", output_mode="files",
+                   name="系统-完整日志文件 (files)",
+                   description="files 模式: messages / secure / cron 等系统日志整文件 SFTP",
+                   script_content=(
+                       "for f in /var/log/messages /var/log/secure /var/log/cron /var/log/dmesg; do\n"
+                       "  [ -e \"$f\" ] && echo \"$f\"\n"
+                       "done\n"
+                       "ls /var/log/messages-* /var/log/secure-* 2>/dev/null\n"
+                   ),
+                   target_node_type="all", timeout=120),
     ]
 
     for s in scripts:
         db.add(s)
     db.commit()
-    print(f"  - 已生成 {len(scripts)} 个示例诊断脚本（业务诊断 + 硬件诊断）")
+    print(f"  - 已生成 {len(scripts)} 个示例诊断脚本（业务诊断 + 硬件诊断 + 日志导出）")
+
+
+# 把 log_export 种子单独抽出来, 给旧 DB 增量补全使用
+# (新 DB 走 _seed_diag_scripts 内联的列表; 旧 DB 走 _seed_log_export_if_missing)
+def _export_seed(category, name, description, script_content, timeout=60, output_mode="stdout"):
+    return {
+        "script_tab": "log_export", "category": category, "name": name,
+        "description": description, "script_content": script_content,
+        "target_node_type": "all", "timeout": timeout, "enabled": True,
+        "output_mode": output_mode,
+    }
+
+
+_DEFAULT_LOG_EXPORT_SEEDS.extend([
+    _export_seed("business", "业务-应用日志", "导出业务进程相关日志, 默认抓 /var/log/app/ 目录",
+        "if [ -n \"$ALERT_FROM\" ]; then\n"
+        "  find /var/log/app -type f -newermt \"$ALERT_FROM\" ! -newermt \"$ALERT_TO\" "
+            "-exec tail -n +1 {} + 2>/dev/null\n"
+        "else\n"
+        "  tail -n 500 /var/log/app/*.log 2>/dev/null || echo '无应用日志'\n"
+        "fi"),
+    _export_seed("system", "系统-journalctl", "按时间窗导出 systemd journal",
+        "if [ -n \"$ALERT_FROM\" ]; then\n"
+        "  journalctl --since=\"$ALERT_FROM\" --until=\"$ALERT_TO\" --no-pager\n"
+        "else\n"
+        "  journalctl -n 1000 --no-pager\n"
+        "fi"),
+    _export_seed("system", "系统-messages", "导出 /var/log/messages",
+        "if [ -n \"$ALERT_FROM\" ]; then\n"
+        "  awk -v from=\"$ALERT_FROM\" -v to=\"$ALERT_TO\" "
+            "'$0 >= from && $0 <= to' /var/log/messages 2>/dev/null\n"
+        "else\n"
+        "  tail -n 2000 /var/log/messages 2>/dev/null\n"
+        "fi"),
+    _export_seed("kernel", "内核-dmesg", "导出 dmesg 内核日志",
+        "if [ -n \"$ALERT_FROM\" ]; then\n"
+        "  dmesg --since=\"$ALERT_FROM\" --until=\"$ALERT_TO\" 2>/dev/null || dmesg -T\n"
+        "else\n"
+        "  dmesg -T 2>/dev/null || dmesg\n"
+        "fi", timeout=30),
+    _export_seed("network", "网络-接口状态", "导出网卡链路/IP/路由/统计快照",
+        "echo '=== ip link ===' && ip -s link show\n"
+        "echo '=== ip addr ===' && ip addr show\n"
+        "echo '=== ip route ===' && ip route show\n"
+        "echo '=== ss -s ==='   && ss -s\n", timeout=30),
+    _export_seed("network", "网络-RDMA/DPDK", "导出 RDMA / DPDK 相关日志",
+        "echo '=== ibstat ===' && (ibstat 2>/dev/null || echo 'no RDMA')\n"
+        "echo '=== rdma link ===' && (rdma link show 2>/dev/null || true)\n"
+        "echo '=== dpdk-devbind ===' && (dpdk-devbind.py --status 2>/dev/null || echo 'no DPDK')\n",
+        timeout=30),
+
+    # ── files 模式样例: 输出路径清单, 后端按行 SFTP 完整下载 ──
+    # 避免命令筛选漏日志: 这里只决定"下载哪些文件", 文件内容原样拉回, 不做截断
+    _export_seed("business", "业务-完整日志文件 (files)",
+        "files 模式: 输出待下载的绝对路径, 每行一个。后端 SFTP 完整拉回, "
+        "不会被 stdout 模式 50KB 截断, 适合需要完整保留日志的场景。",
+        "# 输出模式 = files, 这里每输出一行 = 待 SFTP 下载的远端绝对路径\n"
+        "# 空行和 # 开头的注释会被忽略\n"
+        "if [ -n \"$ALERT_FROM\" ]; then\n"
+        "  # 只下载在告警时间窗内修改过的文件\n"
+        "  find /var/log/app -maxdepth 2 -name '*.log*' -type f \\\n"
+        "       -newermt \"$ALERT_FROM\" ! -newermt \"$ALERT_TO\" 2>/dev/null\n"
+        "else\n"
+        "  # 没传时间窗 → 拿当前所有候选\n"
+        "  ls /var/log/app/*.log* 2>/dev/null\n"
+        "fi",
+        timeout=120, output_mode="files"),
+
+    _export_seed("system", "系统-完整日志文件 (files)",
+        "files 模式: 把 messages / secure / cron 等系统日志整文件 SFTP 回来",
+        "# 固定路径示例: 一行一个\n"
+        "for f in /var/log/messages /var/log/secure /var/log/cron /var/log/dmesg; do\n"
+        "  [ -e \"$f\" ] && echo \"$f\"\n"
+        "done\n"
+        "# 也带上轮转出来的归档\n"
+        "ls /var/log/messages-* /var/log/secure-* 2>/dev/null\n",
+        timeout=120, output_mode="files"),
+])
 
 
 def seed_demo_data():

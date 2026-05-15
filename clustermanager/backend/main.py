@@ -20,6 +20,7 @@ def _run_migrations():
     """简单列迁移：为已存在的表添加新列"""
     migrations = [
         "ALTER TABLE diag_scripts ADD COLUMN script_tab VARCHAR(20) DEFAULT 'hardware'",
+        "ALTER TABLE diag_scripts ADD COLUMN output_mode VARCHAR(20) DEFAULT 'stdout'",
         # v2: PXE 节点新增字段
         "ALTER TABLE nodes ADD COLUMN rdma_nics VARCHAR(100)",
         "ALTER TABLE nodes ADD COLUMN rdma_ips  VARCHAR(200)",

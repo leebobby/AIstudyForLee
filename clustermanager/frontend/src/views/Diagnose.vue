@@ -139,80 +139,221 @@
       </el-tab-pane>
 
       <!-- ══════════════════════════════════════
-           Tab 3: 日志采集
+           Tab 3: 日志导出 (SSH 拉取目标主机日志到本机目录)
       ══════════════════════════════════════ -->
-      <el-tab-pane label="日志采集" name="collect">
+      <el-tab-pane label="日志导出" name="export">
         <el-card class="query-card">
-          <el-row :gutter="24">
-            <el-col :span="7">
-              <div class="form-section-label">角色</div>
-              <el-checkbox-group v-model="logQuery.roles" class="vert-checks">
-                <el-checkbox value="master">Master</el-checkbox>
-                <el-checkbox value="slave">Slave</el-checkbox>
-                <el-checkbox value="subswath">Subswath</el-checkbox>
-                <el-checkbox value="globalstorage">GlobalStorage</el-checkbox>
-              </el-checkbox-group>
-            </el-col>
-            <el-col :span="7">
-              <div class="form-section-label">日志目录</div>
-              <el-checkbox-group v-model="logQuery.log_types" class="vert-checks">
-                <el-checkbox value="business">业务日志</el-checkbox>
-                <el-checkbox value="system">系统日志</el-checkbox>
-                <el-checkbox value="kernel">内核日志</el-checkbox>
-                <el-checkbox value="network">网卡日志</el-checkbox>
-              </el-checkbox-group>
-            </el-col>
-            <el-col :span="10">
-              <div class="form-section-label">时间范围</div>
-              <el-date-picker
-                v-model="logQuery.time_range"
-                type="datetimerange"
-                range-separator="至"
-                start-placeholder="开始时间"
-                end-placeholder="结束时间"
-                size="small"
-                style="width:100%"
-                value-format="YYYY-MM-DDTHH:mm:ss"
-              />
-              <el-button
-                type="primary" style="margin-top:14px;width:100%"
-                @click="queryLogs" :loading="querying"
-              >
-                <el-icon><Search /></el-icon>&nbsp;查询日志
-              </el-button>
-            </el-col>
-          </el-row>
+          <el-form :model="exportForm" label-width="100px" :disabled="exporting">
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="目标主机">
+                  <el-input v-model="exportForm.target_host" placeholder="172.16.3.100" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="6">
+                <el-form-item label="SSH 端口">
+                  <el-input-number v-model="exportForm.ssh_port" :min="1" :max="65535"
+                                   controls-position="right" style="width:100%" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="5">
+                <el-form-item label="用户">
+                  <el-input v-model="exportForm.ssh_user" placeholder="root" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="5">
+                <el-form-item label="密码">
+                  <el-input v-model="exportForm.ssh_password" type="password" show-password
+                            placeholder="留空用已保存" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="16">
+              <el-col :span="14">
+                <el-form-item label="输出目录">
+                  <el-input v-model="exportForm.output_dir" placeholder="D:\logs\export">
+                    <template #append>
+                      <el-button @click="pickOutputDir" :loading="pickingFolder">
+                        <el-icon><FolderOpened /></el-icon>&nbsp;浏览
+                      </el-button>
+                    </template>
+                  </el-input>
+                  <div class="run-ip-hint">不存在会自动创建; 浏览按钮调系统原生目录选择</div>
+                </el-form-item>
+              </el-col>
+              <el-col :span="10">
+                <el-form-item label="告警时间">
+                  <el-date-picker
+                    v-model="exportForm.alert_time" type="datetime"
+                    placeholder="可选, 启用脚本时间窗"
+                    style="width:200px"
+                    value-format="YYYY-MM-DDTHH:mm:ss"
+                  />
+                  <el-button v-if="exportForm.alert_time" link size="small" type="info"
+                             style="margin-left:6px" @click="exportForm.alert_time = null">清除</el-button>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row v-if="exportForm.alert_time" :gutter="16">
+              <el-col :span="24">
+                <el-form-item label="时间窗 (分)">
+                  <span class="range-label">前</span>
+                  <el-input-number v-model="exportForm.range_before_min" :min="0" :max="1440"
+                                   size="small" controls-position="right" style="width:110px" />
+                  <span class="range-label">分 · 后</span>
+                  <el-input-number v-model="exportForm.range_after_min"  :min="0" :max="1440"
+                                   size="small" controls-position="right" style="width:110px" />
+                  <span class="range-label">分</span>
+                  <span class="run-ip-hint" style="display:inline-block;margin-left:10px">
+                    脚本里可用 <code>$ALERT_TIME</code> / <code>$ALERT_FROM</code> / <code>$ALERT_TO</code>
+                  </span>
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </el-form>
         </el-card>
 
+        <!-- 脚本选择: 按 category 分组, 每个 category 内多脚本可选, 可编辑/新增 -->
         <el-card class="result-card">
           <template #header>
             <div class="card-header">
-              <span>采集结果</span>
-              <el-tag v-if="logResults.length" type="info" size="small">共 {{ logResults.length }} 条</el-tag>
+              <span>采集脚本 (按类型分组)</span>
+              <div>
+                <el-button size="small" @click="openScriptDialog(null, 'log_export')">
+                  <el-icon><Plus /></el-icon>&nbsp;新建采集脚本
+                </el-button>
+                <el-button size="small" type="primary" @click="openNewTypeDialog('log_export')">
+                  <el-icon><FolderAdd /></el-icon>&nbsp;新建类型
+                </el-button>
+              </div>
             </div>
           </template>
-          <el-empty
-            v-if="!logResults.length && !querying"
-            description="选择条件后点击「查询日志」"
-            :image-size="80"
-          />
-          <el-table v-else :data="logResults" size="small" max-height="480" stripe>
-            <el-table-column prop="timestamp" label="时间" width="160">
-              <template #default="{ row }">{{ formatDate(row.timestamp) }}</template>
-            </el-table-column>
-            <el-table-column prop="node" label="节点" width="140" show-overflow-tooltip />
-            <el-table-column prop="role" label="角色" width="110">
+
+          <div v-if="!exportCategories.length" class="empty-hint">
+            暂无采集脚本, 点「新建类型」或「新建采集脚本」开始
+          </div>
+
+          <div v-for="cat in exportCategories" :key="'exp-' + cat" class="category-section">
+            <div class="category-header">
+              <span class="cat-bullet">▣</span>{{ cat }}
+              <el-checkbox
+                :model-value="isCatAllChecked(cat)"
+                :indeterminate="isCatIndeterminate(cat)"
+                @change="toggleCatAll(cat, $event)"
+                style="margin-left: 12px"
+              >全选</el-checkbox>
+            </div>
+            <div class="script-grid">
+              <div
+                v-for="s in getScripts('log_export', cat)" :key="s.id"
+                class="script-card"
+                :class="{ 'script-card--selected': exportForm.script_ids.includes(s.id) }"
+              >
+                <div class="script-card-body">
+                  <el-checkbox
+                    :model-value="exportForm.script_ids.includes(s.id)"
+                    @change="toggleScript(s.id, $event)"
+                  >
+                    <span class="sc-name">{{ s.name }}</span>
+                  </el-checkbox>
+                  <div class="sc-desc" style="margin-top:4px">{{ s.description || '—' }}</div>
+                  <div class="sc-meta">
+                    <el-tag
+                      size="small"
+                      :type="(s.output_mode || 'stdout') === 'files' ? 'success' : 'info'"
+                    >
+                      {{ (s.output_mode || 'stdout') === 'files' ? 'SFTP 完整文件' : 'stdout 落盘' }}
+                    </el-tag>
+                    <span class="sc-timeout">超时 {{ s.timeout }}s</span>
+                  </div>
+                </div>
+                <div class="script-card-footer">
+                  <el-button size="small" @click="openScriptDialog(s, 'log_export')">
+                    <el-icon><Edit /></el-icon> 编辑
+                  </el-button>
+                  <el-button size="small" type="danger" @click="confirmDelete(s)">
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
+                </div>
+              </div>
+              <div v-if="!getScripts('log_export', cat).length" class="script-card-empty">
+                <el-button text type="primary" @click="openScriptDialog(null, 'log_export', cat)">
+                  <el-icon><Plus /></el-icon> 添加脚本
+                </el-button>
+              </div>
+            </div>
+          </div>
+        </el-card>
+
+        <!-- 执行栏 -->
+        <el-card class="result-card">
+          <template #header>
+            <div class="card-header">
+              <span>导出执行</span>
+              <el-tag v-if="exportResults.length" type="info" size="small">
+                已完成 {{ exportResults.length }} / {{ exportProgress.total || '?' }}
+              </el-tag>
+            </div>
+          </template>
+
+          <div class="run-action-bar">
+            <el-button
+              v-if="!exporting"
+              type="primary"
+              @click="startExport"
+              :disabled="!exportForm.script_ids.length || !exportForm.target_host || !exportForm.output_dir"
+            >
+              <el-icon><Download /></el-icon>&nbsp;开始导出 ({{ exportForm.script_ids.length }} 个脚本)
+            </el-button>
+            <el-button
+              v-else type="danger"
+              :loading="cancellingExport"
+              @click="terminateExport"
+            >
+              <el-icon><CircleClose /></el-icon>&nbsp;终止
+            </el-button>
+            <span v-if="exportRunId" class="run-id-tag">run: {{ exportRunId }}</span>
+            <span v-if="exportProgress.output_dir" class="run-progress">
+              落盘目录: <code>{{ exportProgress.output_dir }}</code>
+            </span>
+          </div>
+
+          <el-empty v-if="!exportResults.length && !exporting"
+                    description="勾选脚本后点击「开始导出」" :image-size="60" />
+
+          <el-table v-else :data="exportResults" size="small" max-height="360" stripe>
+            <el-table-column prop="category" label="类型" width="100">
               <template #default="{ row }">
-                <el-tag size="small" type="info">{{ row.role }}</el-tag>
+                <el-tag size="small">{{ row.category }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="log_type" label="日志类型" width="90" />
-            <el-table-column prop="level" label="级别" width="80">
+            <el-table-column prop="name" label="脚本" width="170" show-overflow-tooltip />
+            <el-table-column label="模式" width="100">
               <template #default="{ row }">
-                <el-tag size="small" :type="levelColor(row.level)">{{ row.level }}</el-tag>
+                <el-tag size="small" :type="row.mode === 'files' ? 'success' : 'info'">
+                  {{ row.mode === 'files' ? 'files' : 'stdout' }}
+                </el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="message" label="内容" show-overflow-tooltip />
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="row.success ? 'success' : 'danger'" size="small">
+                  {{ row.success ? '成功' : `失败 (${row.exit_code})` }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="大小" width="90">
+              <template #default="{ row }">
+                {{ row.size != null ? `${(row.size/1024).toFixed(1)} KB` : '—' }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="remote" label="远端路径" width="200" show-overflow-tooltip>
+              <template #default="{ row }">
+                <code v-if="row.remote" style="color:#79c0ff">{{ row.remote }}</code>
+                <span v-else style="color:#5a7090">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="file" label="本地落盘路径" show-overflow-tooltip />
           </el-table>
         </el-card>
       </el-tab-pane>
@@ -300,6 +441,23 @@
             </el-form-item>
           </el-col>
         </el-row>
+        <!-- 仅日志导出脚本支持 output_mode: stdout 把 stdout 落一个文件; files 用 SFTP 拉完整文件 -->
+        <el-form-item v-if="scriptForm.script_tab === 'log_export'" label="输出模式">
+          <el-radio-group v-model="scriptForm.output_mode">
+            <el-radio-button value="stdout">stdout 落盘</el-radio-button>
+            <el-radio-button value="files">SFTP 完整文件</el-radio-button>
+          </el-radio-group>
+          <div class="run-ip-hint">
+            <b v-if="scriptForm.output_mode === 'files'">files</b><b v-else>stdout</b>:
+            <span v-if="scriptForm.output_mode === 'files'">
+              脚本 stdout 当作待下载路径清单 (一行一个绝对路径), 后端 SFTP 完整拉回。
+              适合需要保留完整日志、避免筛选命令漏行的场景。空行 / # 注释行忽略。
+            </span>
+            <span v-else>
+              脚本 stdout 直接写到一个 .log 文件 (默认)。超过 50KB 会被截断, 适合摘要或小输出。
+            </span>
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="scriptDialog.visible = false">取消</el-button>
@@ -312,9 +470,18 @@
       v-model="runDialog.visible"
       :title="`运行: ${runDialog.script?.name}`"
       width="780px"
-      @closed="runResults = []"
+      :close-on-click-modal="!running"
+      :close-on-press-escape="!running"
+      :show-close="!running"
+      @closed="onRunDialogClosed"
     >
-      <el-form :model="runForm" label-width="80px" class="run-form-block">
+      <el-alert
+        v-if="running"
+        type="warning" :closable="false" show-icon
+        title="正在执行, 对话框已锁定. 点「终止」可强制中断 (会关闭所有正在进行的 SSH)"
+        style="margin-bottom:14px"
+      />
+      <el-form :model="runForm" label-width="86px" class="run-form-block" :disabled="running">
         <!-- 模式切换 -->
         <el-form-item label="目标方式">
           <el-radio-group v-model="runForm.target_mode" size="small">
@@ -355,17 +522,54 @@
           <el-input v-model.number="runForm.ssh_port" type="number" min="1" max="65535"
                     placeholder="端口" style="width:90px;margin-left:8px" />
         </el-form-item>
+
+        <!-- 故障时间窗 (可选): 脚本里可直接读 $ALERT_TIME / $ALERT_FROM / $ALERT_TO -->
+        <el-form-item label="告警时间">
+          <el-date-picker
+            v-model="runForm.alert_time"
+            type="datetime"
+            placeholder="可选, 留空表示不限时间"
+            style="width:240px"
+            value-format="YYYY-MM-DDTHH:mm:ss"
+          />
+          <el-button
+            v-if="runForm.alert_time" size="small" link type="info"
+            style="margin-left:6px" @click="runForm.alert_time = null"
+          >清除</el-button>
+        </el-form-item>
+        <el-form-item label="查询范围" v-if="runForm.alert_time">
+          <span class="range-label">前</span>
+          <el-input-number v-model="runForm.range_before_min" :min="0" :max="1440"
+                           size="small" controls-position="right" style="width:110px" />
+          <span class="range-label">分 · 后</span>
+          <el-input-number v-model="runForm.range_after_min"  :min="0" :max="1440"
+                           size="small" controls-position="right" style="width:110px" />
+          <span class="range-label">分</span>
+          <div class="run-ip-hint">
+            脚本可用变量 <code>$ALERT_TIME</code> / <code>$ALERT_FROM</code> / <code>$ALERT_TO</code>
+            (格式 <code>YYYY-MM-DD HH:MM:SS</code>) 给 journalctl --since/--until 或 dmesg 用
+          </div>
+        </el-form-item>
       </el-form>
 
       <pre class="script-preview">{{ runDialog.script?.script_content }}</pre>
 
       <div class="run-action-bar">
         <el-button
-          type="primary" :loading="running"
+          v-if="!running"
+          type="primary"
           @click="executeScript"
           :disabled="runForm.target_mode === 'nodes' ? !runForm.node_ids.length : !runForm.manual_ips.trim()"
         >
           <el-icon><VideoPlay /></el-icon>&nbsp;执行
+        </el-button>
+        <el-button
+          v-else
+          type="danger"
+          :loading="cancelling"
+          @click="terminateRun"
+        >
+          <el-icon><CircleClose /></el-icon>&nbsp;终止
         </el-button>
         <el-tag v-if="credsLoaded" size="small" type="success">
           已保存凭据 ({{ runForm.ssh_user }})
@@ -373,6 +577,7 @@
         <span v-if="runProgress.total" class="run-progress">
           已完成 {{ runResults.length }} / {{ runProgress.total }}
         </span>
+        <span v-if="currentRunId" class="run-id-tag">run: {{ currentRunId }}</span>
       </div>
 
       <div v-for="res in runResults" :key="res.node_id" class="run-result">
@@ -412,6 +617,7 @@ function getScripts(tab, cat) {
 const DEFAULT_CATS = {
   business: ['初始化', '检测流程', 'LT流程', 'PDA流程'],
   hardware: ['存储诊断', '设备诊断', '网络诊断', '系统诊断'],
+  log_export: ['business', 'system', 'kernel', 'network'],
 }
 
 function loadUserCats(tab) {
@@ -421,8 +627,9 @@ function saveUserCats(tab, list) {
   localStorage.setItem(`diag_cats_${tab}`, JSON.stringify(list))
 }
 
-const userBusinessCats = ref(loadUserCats('business'))
-const userHardwareCats = ref(loadUserCats('hardware'))
+const userBusinessCats   = ref(loadUserCats('business'))
+const userHardwareCats   = ref(loadUserCats('hardware'))
+const userLogExportCats  = ref(loadUserCats('log_export'))
 
 const businessCategories = computed(() => {
   const fromScripts = scripts.value.filter(s => s.script_tab === 'business').map(s => s.category)
@@ -431,6 +638,10 @@ const businessCategories = computed(() => {
 const hardwareCategories = computed(() => {
   const fromScripts = scripts.value.filter(s => s.script_tab === 'hardware').map(s => s.category)
   return [...new Set([...DEFAULT_CATS.hardware, ...userHardwareCats.value, ...fromScripts])]
+})
+const exportCategories   = computed(() => {
+  const fromScripts = scripts.value.filter(s => s.script_tab === 'log_export').map(s => s.category)
+  return [...new Set([...DEFAULT_CATS.log_export, ...userLogExportCats.value, ...fromScripts])]
 })
 
 // ─── 新建类型 ───
@@ -443,16 +654,15 @@ function confirmNewType() {
   const name = newTypeDialog.value.name.trim()
   if (!name) { ElMessage.warning('请输入类型名称'); return }
   const tab = newTypeDialog.value.tab
-  if (tab === 'business') {
-    if (!businessCategories.value.includes(name)) {
-      userBusinessCats.value.push(name)
-      saveUserCats('business', userBusinessCats.value)
-    }
-  } else {
-    if (!hardwareCategories.value.includes(name)) {
-      userHardwareCats.value.push(name)
-      saveUserCats('hardware', userHardwareCats.value)
-    }
+  const buckets = {
+    business:   { list: userBusinessCats,  all: businessCategories  },
+    hardware:   { list: userHardwareCats,  all: hardwareCategories  },
+    log_export: { list: userLogExportCats, all: exportCategories    },
+  }
+  const b = buckets[tab]
+  if (b && !b.all.value.includes(name)) {
+    b.list.value.push(name)
+    saveUserCats(tab, b.list.value)
   }
   ElMessage.success(`已创建「${name}」`)
   newTypeDialog.value.visible = false
@@ -464,12 +674,15 @@ const saving = ref(false)
 const fileInputRef = ref(null)
 
 function defaultForm(tab = 'business', cat = '') {
+  const defaultCat = DEFAULT_CATS[tab]?.[0] || ''
   return {
     name: '', description: '',
     script_tab: tab,
-    category: cat || (tab === 'business' ? DEFAULT_CATS.business[0] : DEFAULT_CATS.hardware[0]),
+    category: cat || defaultCat,
     script_content: '', target_node_type: 'all',
-    timeout: 30, enabled: true
+    timeout: tab === 'log_export' ? 60 : 30,
+    enabled: true,
+    output_mode: 'stdout',
   }
 }
 const scriptForm = ref(defaultForm())
@@ -480,7 +693,10 @@ function openScriptDialog(script, tab, presetCat = '') {
 }
 
 function suggestCats(query, cb) {
-  const cats = scriptDialog.value.tab === 'business' ? businessCategories.value : hardwareCategories.value
+  const t = scriptDialog.value.tab
+  const cats = t === 'business'    ? businessCategories.value
+            : t === 'log_export'   ? exportCategories.value
+            : hardwareCategories.value
   cb(cats.filter(c => c.includes(query || '')).map(c => ({ value: c })))
 }
 
@@ -532,7 +748,7 @@ async function confirmDelete(script) {
   }
 }
 
-// ─── 运行脚本 (流式 SSE + 凭据持久化) ───
+// ─── 运行脚本 (流式 SSE + 凭据持久化 + 可终止) ───
 const PWD_MASK = '********'
 const runDialog = ref({ visible: false, script: null })
 const runForm = ref({
@@ -542,8 +758,14 @@ const runForm = ref({
   ssh_user: 'root',
   ssh_password: '',
   ssh_port: 22,
+  // 故障时间窗 (可选)
+  alert_time: null,
+  range_before_min: 5,
+  range_after_min: 10,
 })
 const running = ref(false)
+const cancelling = ref(false)
+const currentRunId = ref('')
 const runResults = ref([])
 const runProgress = ref({ total: 0 })
 const credsLoaded = ref(false)
@@ -571,8 +793,17 @@ function openRunDialog(script) {
   runDialog.value = { visible: true, script }
   runResults.value = []
   runProgress.value = { total: 0 }
+  currentRunId.value = ''
   loadSavedCreds()
   loadNodes()        // 拉最新节点状态, 仅在线节点可选
+}
+
+function onRunDialogClosed() {
+  runResults.value = []
+  currentRunId.value = ''
+  // 若用户在 running 中强行尝试关 (理论上 show-close 已禁用), 安全兜底
+  running.value = false
+  cancelling.value = false
 }
 
 async function executeScript() {
@@ -585,12 +816,17 @@ async function executeScript() {
     ssh_user: runForm.value.ssh_user,
     ssh_password: runForm.value.ssh_password,
     ssh_port: Number(runForm.value.ssh_port) || 22,
+    alert_time: runForm.value.alert_time || null,
+    range_before_min: Number(runForm.value.range_before_min) || 0,
+    range_after_min:  Number(runForm.value.range_after_min)  || 0,
   }
   if (!payload.node_ids.length && !payload.target_ips.length) {
     ElMessage.warning('请选择节点或填写目标 IP')
     return
   }
   running.value = true
+  cancelling.value = false
+  currentRunId.value = ''
   runResults.value = []
   runProgress.value = { total: 0 }
 
@@ -628,6 +864,7 @@ async function executeScript() {
 
         if (evt.type === 'start') {
           runProgress.value = { total: evt.total }
+          currentRunId.value = evt.run_id || ''
         } else if (evt.type === 'result') {
           runResults.value.push(evt)        // 增量追加, 实时显示
         } else if (evt.type === 'end') {
@@ -638,7 +875,11 @@ async function executeScript() {
 
     const total = endEvent?.total ?? runResults.value.length
     const ok = endEvent?.success ?? runResults.value.filter(r => r.success).length
-    ElMessage[ok === total ? 'success' : 'warning'](`执行完成: ${ok}/${total} 个节点成功`)
+    if (endEvent?.cancelled) {
+      ElMessage.warning(`已终止: ${ok}/${total} 个节点完成`)
+    } else {
+      ElMessage[ok === total ? 'success' : 'warning'](`执行完成: ${ok}/${total} 个节点成功`)
+    }
 
     // 凭据持久化: 仅当用户实际输入了新密码时, 后端会自动保存
     // 这里再拉一次状态以更新标签
@@ -649,40 +890,204 @@ async function executeScript() {
     ElMessage.error(e.message || '执行失败')
   } finally {
     running.value = false
+    cancelling.value = false
+    currentRunId.value = ''
   }
 }
 
-// ─── 日志查询 ───
-const logQuery = ref({ roles: ['master'], log_types: ['system'], time_range: null })
-const querying = ref(false)
-const logResults = ref([])
-
-async function queryLogs() {
-  if (!logQuery.value.roles.length || !logQuery.value.log_types.length) {
-    ElMessage.warning('请至少选择一个角色和一个日志类型')
+async function terminateRun() {
+  if (!currentRunId.value || cancelling.value) return
+  try {
+    await ElMessageBox.confirm(
+      '强制终止会立刻关闭所有正在进行的 SSH 连接, 已完成的节点结果会保留, 进行中的标记为已终止。继续?',
+      '终止确认',
+      { type: 'warning', confirmButtonText: '终止', cancelButtonText: '继续等待' }
+    )
+  } catch {
     return
   }
-  querying.value = true
-  logResults.value = []
+  cancelling.value = true
   try {
-    const payload = {
-      roles: logQuery.value.roles,
-      log_types: logQuery.value.log_types,
-      start_time: logQuery.value.time_range?.[0] || null,
-      end_time: logQuery.value.time_range?.[1] || null,
-    }
-    const res = await axios.post('/api/diagnose/query-logs', payload)
-    logResults.value = res.data.entries
-    ElMessage.success(`查询到 ${res.data.total} 条日志`)
+    await axios.post(`/api/diagnose/scripts/runs/${currentRunId.value}/cancel`)
+    ElMessage.info('终止信号已发送, 等待剩余节点收尾')
   } catch (e) {
-    ElMessage.error(e.response?.data?.detail || '查询失败')
+    ElMessage.error(e.response?.data?.detail || '终止失败')
+    cancelling.value = false
+  }
+}
+
+// ─── 日志导出 (SSH 拉取 stdout 落盘) ───
+const exportForm = ref({
+  target_host: '172.16.3.100',
+  ssh_port: 22,
+  ssh_user: 'root',
+  ssh_password: '',
+  output_dir: 'D:\\logs\\export',
+  script_ids: [],
+  alert_time: null,
+  range_before_min: 5,
+  range_after_min: 10,
+})
+const exporting = ref(false)
+const cancellingExport = ref(false)
+const exportRunId = ref('')
+const exportProgress = ref({ total: 0, output_dir: '' })
+const exportResults = ref([])
+const pickingFolder = ref(false)
+
+// 选输出目录: 优先走 pywebview 桌面原生桥, 浏览器/dev 模式回落到后端 tkinter subprocess
+async function pickOutputDir() {
+  pickingFolder.value = true
+  try {
+    const native = window.pywebview?.api?.pick_folder
+    if (typeof native === 'function') {
+      try {
+        const p = await native(exportForm.value.output_dir || '')
+        if (p) exportForm.value.output_dir = p
+        return
+      } catch (e) {
+        console.warn('[pickOutputDir] pywebview 桥失败, 回落后端', e)
+      }
+    }
+    const res = await axios.post('/api/diagnose/pick-folder', {
+      initial: exportForm.value.output_dir || '',
+    })
+    if (res.data?.path) {
+      exportForm.value.output_dir = res.data.path
+    } else {
+      ElMessage.info('未选择目录')
+    }
+  } catch (e) {
+    ElMessage.error('选择目录失败: ' + (e.response?.data?.detail || e.message))
   } finally {
-    querying.value = false
+    pickingFolder.value = false
+  }
+}
+
+function toggleScript(id, checked) {
+  const arr = exportForm.value.script_ids
+  if (checked) {
+    if (!arr.includes(id)) arr.push(id)
+  } else {
+    const i = arr.indexOf(id); if (i >= 0) arr.splice(i, 1)
+  }
+}
+function isCatAllChecked(cat) {
+  const ids = getScripts('log_export', cat).map(s => s.id)
+  return ids.length > 0 && ids.every(id => exportForm.value.script_ids.includes(id))
+}
+function isCatIndeterminate(cat) {
+  const ids = getScripts('log_export', cat).map(s => s.id)
+  const picked = ids.filter(id => exportForm.value.script_ids.includes(id))
+  return picked.length > 0 && picked.length < ids.length
+}
+function toggleCatAll(cat, checked) {
+  const ids = getScripts('log_export', cat).map(s => s.id)
+  const set = new Set(exportForm.value.script_ids)
+  if (checked) ids.forEach(id => set.add(id))
+  else         ids.forEach(id => set.delete(id))
+  exportForm.value.script_ids = [...set]
+}
+
+async function startExport() {
+  // 默认凭据补全 (跟脚本运行对话框共用同一份持久化凭据)
+  if (!exportForm.value.ssh_password) {
+    try {
+      const cr = await axios.get('/api/diagnose/ssh-creds')
+      if (cr.data?.has_saved) {
+        exportForm.value.ssh_password = PWD_MASK
+      }
+    } catch {}
+  }
+  exporting.value = true
+  cancellingExport.value = false
+  exportRunId.value = ''
+  exportResults.value = []
+  exportProgress.value = { total: 0, output_dir: '' }
+
+  const payload = {
+    target_host: exportForm.value.target_host.trim(),
+    ssh_port:    Number(exportForm.value.ssh_port) || 22,
+    ssh_user:    exportForm.value.ssh_user,
+    ssh_password: exportForm.value.ssh_password,
+    script_ids:  exportForm.value.script_ids,
+    output_dir:  exportForm.value.output_dir,
+    alert_time:  exportForm.value.alert_time || null,
+    range_before_min: Number(exportForm.value.range_before_min) || 0,
+    range_after_min:  Number(exportForm.value.range_after_min)  || 0,
+  }
+
+  try {
+    const resp = await fetch('/api/diagnose/log-export/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!resp.ok) {
+      let detail = `HTTP ${resp.status}`
+      try { detail = (await resp.json()).detail || detail } catch {}
+      throw new Error(detail)
+    }
+
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let endEvent = null
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const chunk = buf.slice(0, idx).trim()
+        buf = buf.slice(idx + 2)
+        if (!chunk.startsWith('data:')) continue
+        const json = chunk.replace(/^data:\s*/, '')
+        if (!json) continue
+        let evt
+        try { evt = JSON.parse(json) } catch { continue }
+
+        if (evt.type === 'start') {
+          exportProgress.value = { total: evt.total, output_dir: evt.output_dir }
+          exportRunId.value = evt.run_id || ''
+        } else if (evt.type === 'result') {
+          exportResults.value.push(evt)
+        } else if (evt.type === 'end') {
+          endEvent = evt
+        }
+      }
+    }
+    const ok = exportResults.value.filter(r => r.success).length
+    const total = exportProgress.value.total || exportResults.value.length
+    if (endEvent?.cancelled) {
+      ElMessage.warning(`已终止: ${ok}/${total} 个脚本完成, 文件落在 ${endEvent.output_dir}`)
+    } else {
+      ElMessage[ok === total ? 'success' : 'warning'](
+        `导出完成: ${ok}/${total} 成功, 文件落在 ${endEvent?.output_dir || exportProgress.value.output_dir}`
+      )
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '导出失败')
+  } finally {
+    exporting.value = false
+    cancellingExport.value = false
+    exportRunId.value = ''
+  }
+}
+
+async function terminateExport() {
+  if (!exportRunId.value || cancellingExport.value) return
+  cancellingExport.value = true
+  try {
+    await axios.post(`/api/diagnose/scripts/runs/${exportRunId.value}/cancel`)
+    ElMessage.info('终止信号已发送')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '终止失败')
+    cancellingExport.value = false
   }
 }
 
 // ─── Helpers ───
-const levelColor = l => ({ error: 'danger', warning: 'warning', info: 'success', debug: 'info' }[l] || 'info')
 const formatDate = d => d ? new Date(d).toLocaleString() : ''
 
 // ─── 发布包管理 ───
@@ -883,6 +1288,10 @@ onMounted(() => {
   box-shadow: 0 4px 14px rgba(233, 69, 96, 0.18);
 }
 .script-card--disabled { opacity: 0.5; }
+.script-card--selected {
+  border-color: #67c23a;
+  box-shadow: 0 0 0 1px rgba(103, 194, 58, 0.35) inset;
+}
 
 .script-card-body { flex: 1; }
 .sc-name { font-weight: 600; font-size: 14px; color: #fff; margin-bottom: 4px; }
@@ -956,6 +1365,25 @@ onMounted(() => {
 .run-progress {
   color: #8b949e;
   font-size: 12px;
+}
+.run-id-tag {
+  color: #5a7090;
+  font-size: 11px;
+  font-family: Consolas, monospace;
+  margin-left: 4px;
+}
+.range-label {
+  color: #a0a0a0;
+  font-size: 13px;
+  margin: 0 8px;
+}
+.range-label:first-child { margin-left: 0; }
+.run-form-block code {
+  color: #79c0ff;
+  background: #0d1117;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
 }
 .run-host {
   color: #8b949e;

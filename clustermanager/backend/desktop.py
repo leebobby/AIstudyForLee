@@ -117,6 +117,22 @@ def main():
             title = f"Cluster Manager (shared mode, port {port})"
 
     print(f"[desktop] opening webview window -> {local_url}")
+
+    # 暴露给前端 JS: window.pywebview.api.pick_folder() — 调系统原生目录选择
+    # 用于日志导出页"输出目录"的浏览按钮; 浏览器侧 fetch 拿不到绝对路径,
+    # 只有走 pywebview 的原生桥或后端 subprocess 才能取到 Windows 完整路径
+    class JSAPI:
+        def pick_folder(self, initial: str = ""):
+            try:
+                res = webview.windows[0].create_file_dialog(
+                    webview.FOLDER_DIALOG,
+                    directory=initial or "",
+                )
+            except Exception as e:
+                print(f"[desktop][pick_folder] {e}")
+                return ""
+            return res[0] if res else ""
+
     webview.create_window(
         title=title,
         url=local_url,
@@ -124,6 +140,7 @@ def main():
         height=900,
         min_size=(1024, 700),
         resizable=True,
+        js_api=JSAPI(),
     )
     # 开启 DevTools: 在窗口内按 F12 / Ctrl+Shift+I 打开开发者工具,
     # 可以看到 console.log / Network 面板 (排查 API 返回值)

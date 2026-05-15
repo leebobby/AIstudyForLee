@@ -259,6 +259,111 @@ cluster-manager-linux-arm64.tar.gz
 
 ## 变更记录
 
+### 2026-05-15 — 故障诊断「日志导出」改造
+
+**背景**：原 Tab3「日志采集」实际只是查询数据库里的演示日志，不是真的从远端拉日志。
+用户场景是诊断一台具体的故障机器，需要把它的 journal / messages / dmesg / 网络快照
+直接拉到本机文件里翻看，并按告警时间窗筛选。
+
+| 文件 | 变更 |
+|------|------|
+| `backend/api/diagnose.py` | 新增 `POST /api/diagnose/log-export/run` (SSE 流式), 接收 `target_host/ssh_port/ssh_user/ssh_password/script_ids[]/output_dir/alert_time/range_before_min/range_after_min`；每个脚本顺序在目标 SSH 上跑、stdout 落盘成一个 `.log` 文件；复用 `_ACTIVE_RUNS` / `_cancel_run` 支持终止；输出路径 `{output_dir}/{时间戳}/{目标主机}/{category}-{name}.log`；`_safe_filename` 把脚本名规范化成安全文件名 |
+| `backend/api/diagnose.py` | 引入 `SessionLocal` 直接构造短生命周期 session, 避开 `next(get_db())` 不会 close 的坑 |
+| `backend/models/seed.py` | 加 6 条 `log_export` 默认脚本（business/system/kernel/network 四类）, 每条都根据 `$ALERT_FROM`/`$ALERT_TO` 是否存在自动切换"按时间窗筛选 vs 取最近 N 条"；新增 `_seed_log_export_if_missing()` 给旧 DB 增量补全, 不动已有 business/hardware 脚本 |
+| `frontend/src/views/Diagnose.vue` | Tab 标签由「日志采集」改为「日志导出」, 名称从 `collect` 改为 `export` |
+| `frontend/src/views/Diagnose.vue` | 新增 `exportForm`（目标 IP / 端口 / 用户 / 密码 / 输出目录 / 告警时间窗 / script_ids[]）、`startExport()` 消费 SSE 流并增量渲染、`terminateExport()` 调取消端点 |
+| `frontend/src/views/Diagnose.vue` | 脚本面板按 category 分组, 每张卡左上 checkbox 选中、右下 编辑/删除；每个类型有"全选"复选框（含 indeterminate 状态）；可点「新建采集脚本」/「新建类型」复用 `scriptDialog` 加新条目 |
+| `frontend/src/views/Diagnose.vue` | `DEFAULT_CATS`、`exportCategories`、`defaultForm`、`suggestCats`、`confirmNewType` 都补上对 `log_export` tab 的支持；默认超时 60s（高于 business/hardware 的 30s）|
+| `frontend/src/views/Diagnose.vue` | 删掉旧的 `logQuery`/`queryLogs`/`logResults`/`levelColor` 死代码 |
+
+**输出目录结构**：
+```
+D:\logs\export\
+  20260515_103000\           ← 时间戳
+    172.16.3.100\            ← 目标主机
+      system-系统-journalctl.log
+      system-系统-messages.log
+      kernel-内核-dmesg.log
+      network-网络-接口状态.log
+```
+
+**默认脚本示例**（system / journalctl）：
+```bash
+if [ -n "$ALERT_FROM" ]; then
+  journalctl --since="$ALERT_FROM" --until="$ALERT_TO" --no-pager
+else
+  journalctl -n 1000 --no-pager
+fi
+```
+
+**用法**：填目标 IP + SSH 密码（首次填，之后自动用持久化凭据）→ 输出目录（不存在自动创建）→ 可选告警时间，前 5 后 10 分钟 → 勾选要跑的脚本 → 开始导出。结果表实时刷新，每行显示状态、文件大小、绝对路径。中途可点终止强关 SSH。
+
+**旧 DB 兼容**：原本只有 business/hardware 脚本的库, 启动时会被 `_seed_log_export_if_missing` 检测到 log_export 为空, 自动写入 6 条默认；已存在的脚本一条都不动。
+
+---
+
+### 2026-05-15 — 故障诊断脚本运行体验优化（终止 / 真超时 / 锁定窗口 / 告警时间窗）
+
+**问题清单**：
+1. 跑得卡住没法停, 只能等
+2. 脚本配的超时不起作用, 长任务也不会被打断
+3. 运行中误点对话框外面就关掉了, 结果丢失
+4. 没办法把故障时间窗带进脚本
+
+| 文件 | 变更 |
+|------|------|
+| `backend/services/diag_service.py` | `run_ssh_command` 整个重写：用 `channel.settimeout(0.5)` 非阻塞轮询代替阻塞 `recv_exit_status()`；本地维护 `deadline = time.time() + timeout` 的硬超时，命中即 `chan.close()` 强行中断（之前 paramiko 的 `exec_command(timeout=N)` 只控制 socket I/O 间隔，命令长时间不输出也不会超时——这就是「超时设置没生效」的根因）；新增 `is_cancelled` 回调和 `on_client` 回调，分别用于检查取消信号、把刚建立的 paramiko client 暴露出去给外部 cancel 关闭；定义清晰的退出码 `EXIT_TIMEOUT=-2 / EXIT_CANCELLED=-3 / EXIT_ERROR=-1` |
+| `backend/api/diagnose.py` | 引入 `_ACTIVE_RUNS: Dict[run_id, {cancel: Event, clients: [], lock: Lock}]` + `_RUNS_LOCK` 跟踪每次运行；`_cancel_run(run_id)` 设置 Event 并 `close()` 所有已注册 client，把阻塞的 `chan.recv` 立刻打断 |
+| `backend/api/diagnose.py` | `ScriptRunRequest` 加 `alert_time: Optional[datetime]` + `range_before_min: int` + `range_after_min: int`；新增 `_build_env_prefix()` 把告警时间窗生成 shell `export ALERT_TIME=... ALERT_FROM=... ALERT_TO=... ALERT_BEFORE_MIN=... ALERT_AFTER_MIN=...` 前缀，拼接到 script_content 头部 |
+| `backend/api/diagnose.py` `/scripts/{id}/run` | 生成 `run_id = uuid4().hex[:12]` 注册到 `_ACTIVE_RUNS`，在 SSE `start` 事件中下发；`_run_one` 起跑前先检查 `_is_cancelled`（已取消的节点 short-circuit 不再连接，返回 exit_code=-3）；`end` 事件附带 `cancelled` 标志；`try/finally` 保证从 `_ACTIVE_RUNS` 摘除避免内存泄漏 |
+| `backend/api/diagnose.py` | 新增 `POST /api/diagnose/scripts/runs/{run_id}/cancel` 端点（找不到 run_id 返回 404）和 `GET /api/diagnose/scripts/runs/active`（调试用） |
+| `frontend/src/views/Diagnose.vue` 运行对话框 | `:close-on-click-modal="!running"` + `:close-on-press-escape="!running"` + `:show-close="!running"`，运行中点击遮罩 / ESC / X 都关不掉；表单 `:disabled="running"` 冻结所有输入；顶部一条 warning alert 告知"对话框已锁定" |
+| `frontend/src/views/Diagnose.vue` 运行对话框 | 「执行」按钮 `v-if="!running"`、运行中切换为红色「终止」`v-else type="danger"`，点击弹二次确认（用语：会立刻关闭进行中的 SSH，已完成的结果保留）；POST `/scripts/runs/{run_id}/cancel`；展示当前 `run_id` 标签 |
+| `frontend/src/views/Diagnose.vue` 运行对话框 | 新增「告警时间」`el-date-picker` + 「前 N 分 · 后 N 分」`el-input-number`（仅在 `alert_time` 非空时显示）；hint 提示脚本里可用 `$ALERT_TIME` / `$ALERT_FROM` / `$ALERT_TO`（格式 `YYYY-MM-DD HH:MM:SS`，适配 `journalctl --since/--until`、`dmesg --since`） |
+| `frontend/src/views/Diagnose.vue` | `executeScript` 把 `alert_time/range_before_min/range_after_min` 放进 payload；start 事件里取 `run_id` 存到 `currentRunId`；end 事件的 `cancelled` 标志决定 toast 是「已终止」还是「执行完成」 |
+
+**取消机制原理**：取消端点同时做两件事 — set `cancel` event + 对每个已注册的 paramiko client 调 `client.close()`。后者会让 SSH 线程里阻塞的 `chan.recv*` 抛异常或 `exit_status_ready()` 立刻变 True；轮询循环每 50ms 也会主动检查 cancel event。两条路保证 100ms 内能收尾。已经在执行的脚本拿到的是部分输出 + `EXIT_CANCELLED=-3`；还没排到 SSH 的节点 short-circuit 直接返回。
+
+**用户感受变化**：
+
+| 场景 | 之前 | 现在 |
+|---|---|---|
+| 脚本卡在 sleep 600 | 只能等满 600s | 点终止 < 100ms 退出 |
+| 脚本超时 30s, 一直 echo 心跳 | 永不超时（socket 一直在动） | 严格 30s 后 chan.close 强中断, exit_code=-2 |
+| 运行中不小心点了对话框外面 | 对话框关掉, 结果丢失 | 关不掉, 必须等结束或点终止 |
+| 想看故障发生时窗的 journal | 改脚本硬编码时间, 跑完改回去 | 表单填告警时间, 脚本里直接 `journalctl --since="$ALERT_FROM" --until="$ALERT_TO"` |
+
+---
+
+### 2026-05-15 — 节点管理空表修复 + dev.bat 一键启动 + 应用规划清理残留
+
+**问题**：用户做完 IP 规划点应用，节点管理还是空的；改完前后端文件没法快速重启验证。
+
+| 文件 | 变更 |
+|------|------|
+| `backend/main.py` | SPA 兜底路由 `/{full_path:path}` 显式排除 `api/` 和 `iso/` 前缀，否则贪婪 path 路由会优先于 FastAPI 的 `redirect_slashes`，把 `GET /api/nodes`（无尾斜杠）兜底成 `index.html`，前端 axios 拿到 HTML 解析失败 → 节点表永远是空 |
+| `backend/api/nodes.py` | `@router.get("/")` 改成 `@router.get("")`，POST 同改，让 `/api/nodes`（无尾斜杠）精确匹配；`/masters` `/slaves` `/topology` 三个静态路径上移到 `/{node_id}` 之前，否则 `topology` 会被当作 node_id 校验失败 |
+| `backend/api/pxe.py` | 新增 `_PLAN_HOSTNAME_RE = ^(master\|slave\|subswath\|gstorage\|acquisition)-\d{2,}$`，`_sync_nodes_json_to_db_impl` 同步前先按这个正则识别"规划生成的主机名"，凡是不在本次 nodes.json 里的全部 delete；demo seed 的 `master-1`（单位数字）和用户自定义主机名都不动 |
+| `backend/api/pxe.py` | 同步返回 `deleted_hostnames` 字段，regenerate 响应 message 显式说明「清理规划残留 N 个」 |
+| `frontend/src/views/Nodes.vue` | 同步按钮 toast 增加「清理残留 N」；deleted_hostnames 列表打到 console 便于核对 |
+| `frontend/src/views/PXEDeploy.vue` | 应用规划确认弹窗补一条说明"名称符合规划模板但不在本次规划 → 一并删除；单数字 demo 和自定义主机名 → 不受影响"；toast 加 `清理残留 N` 字段 |
+| `frontend/src/App.vue` `frontend/src/router/index.js` | 注释掉巡检页菜单和路由（页面留着不删，后续重新设计），左侧导航少一个入口 |
+| `clustermanager/dev.bat` | **新文件** — conda `myenv` + Node.js 一键拉起前后端：后端在新 CMD 跑 `python main.py:8000`，前端在新 CMD 跑 `npm run dev:3000`，5 秒后自动打开浏览器；全 ASCII 文本避免 GBK 代码页问题；含 conda/node/main.py/package.json 前置检查 |
+
+**SPA 兜底踩坑过程**：用户反馈"节点管理还是空"，最开始以为是 DB 没数据；让用户开 F12 看 Network 面板 → `/api/nodes` 返回 HTML 不是 JSON → 锁定路由问题。根因：之前跑过一次 `build.bat`，[backend/static/](clustermanager/backend/static/) 目录存在 → `main.py` 注册了 SPA 兜底 → `/{full_path:path}` 完整匹配 `/api/nodes`（FULL match）优先级高于 FastAPI 的 redirect_slashes（PARTIAL match）→ 请求直接吃 index.html。修复后 axios 能正常拿 JSON，节点表立即恢复。
+
+**规划残留清理**：实际场景是用户先规划了 master×6+slave×12+subswath×2+gstorage×1（22 节点），后改成 master×1+slave×3+subswath×1+gstorage×1（7 节点）。旧的 sync 只 upsert 不删除，DB 里堆着原来的 19 个旧节点 + 7 个新节点 = 26 个不符合预期。新版以「主机名模板」为判据精准清理：
+
+| 主机名 | 模板匹配 | 在新规划中 | 处理 |
+|---|---|---|---|
+| `master-01` (旧) | ✓ | ✗ | 删除 |
+| `master-01` (新) | ✓ | ✓ | upsert |
+| `master-1` (demo) | ✗（单位数字） | n/a | 保留 |
+| `sensor-array-1` (demo) | ✗ | n/a | 保留 |
+| `my-custom-rack-a` (手动添加) | ✗ | n/a | 保留 |
+
+---
+
 ### 2026-05-13 — IP 规划：新规划为准 + 单按钮 UX 修复
 
 **问题**：用户做了新规划（5 节点）后，节点配置仍显示旧的 23 节点、节点管理为空。原因有二：

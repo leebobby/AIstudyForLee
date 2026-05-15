@@ -5,22 +5,53 @@
 import asyncio
 import json
 import os
+import threading
+import uuid
+import shlex
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
-from typing import List, Optional
-from datetime import datetime
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timedelta
 import re
 
-from models.node import Node, Log, FaultPoint, DPDKStats, RDMAStats, DiagScript, get_db
+from models.node import Node, Log, FaultPoint, DPDKStats, RDMAStats, DiagScript, get_db, SessionLocal
 from pydantic import BaseModel
-from services.diag_service import run_ssh_command, collect_node_logs
+from services.diag_service import run_ssh_command, collect_node_logs, export_files_via_sftp
 from services import cred_service
 from config import SCRIPTS_BUNDLE_PATH
 
 # 全局执行器: 诊断脚本通常都不算 CPU 密集, 给一个共享池足够
 _SSH_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="ssh-exec")
+
+# 当前活跃的运行: run_id -> {"cancel": threading.Event, "clients": list, "lock": Lock}
+# 用于支持「终止运行」按钮 — 终止请求会 set cancel 并 close 所有已建立的 paramiko 连接,
+# 把阻塞在 channel.recv 上的 SSH 线程立即唤醒。
+_ACTIVE_RUNS: Dict[str, Dict[str, Any]] = {}
+_RUNS_LOCK = threading.Lock()
+
+
+def _make_run_state() -> Dict[str, Any]:
+    return {
+        "cancel": threading.Event(),
+        "clients": [],            # paramiko.SSHClient 列表
+        "lock": threading.Lock(),
+    }
+
+
+def _cancel_run(run_id: str) -> bool:
+    """触发运行终止: set cancel event + 强关所有已连上的 SSH。返回是否找到该运行。"""
+    with _RUNS_LOCK:
+        state = _ACTIVE_RUNS.get(run_id)
+    if not state:
+        return False
+    state["cancel"].set()
+    with state["lock"]:
+        for c in state["clients"]:
+            try: c.close()
+            except Exception: pass
+    return True
 
 
 router = APIRouter()
@@ -362,12 +393,13 @@ def resolve_fault(fault_id: int, db: Session = Depends(get_db)):
 class DiagScriptCreate(BaseModel):
     name: str
     description: Optional[str] = ''
-    script_tab: str = 'hardware'          # business / hardware
+    script_tab: str = 'hardware'          # business / hardware / log_export
     category: str = '通用诊断'
     script_content: str
     target_node_type: str = 'all'
     timeout: int = 30
     enabled: bool = True
+    output_mode: str = 'stdout'           # stdout / files (仅 log_export 用到)
 
 
 class DiagScriptResponse(BaseModel):
@@ -380,6 +412,7 @@ class DiagScriptResponse(BaseModel):
     target_node_type: str
     timeout: int
     enabled: bool
+    output_mode: Optional[str] = 'stdout'
     created_at: datetime
     updated_at: datetime
 
@@ -452,6 +485,7 @@ def _scripts_to_list(scripts) -> list:
             "target_node_type": s.target_node_type,
             "timeout": s.timeout,
             "enabled": s.enabled,
+            "output_mode": getattr(s, "output_mode", "stdout") or "stdout",
         }
         for s in scripts
     ]
@@ -544,11 +578,36 @@ class ScriptRunRequest(BaseModel):
     ssh_user: str = "root"
     ssh_password: str = ""
     ssh_port: int = 22
+    # 故障定位时间窗 (可选): 脚本可通过 $ALERT_TIME / $ALERT_FROM / $ALERT_TO 引用
+    alert_time: Optional[datetime] = None
+    range_before_min: int = 0
+    range_after_min: int = 0
 
 
 def _resolve_host(node: Node) -> Optional[str]:
     """SSH 走控制面 (10GE), 优先 ctrl_ip, 兜底 mgmt_ip"""
     return node.ctrl_ip or node.mgmt_ip
+
+
+def _build_env_prefix(alert_time: Optional[datetime], before_min: int, after_min: int) -> str:
+    """根据故障时间窗生成 shell export 前缀, 脚本里可直接读 $ALERT_TIME / $ALERT_FROM / $ALERT_TO"""
+    if not alert_time:
+        return ""
+    before = max(0, int(before_min or 0))
+    after  = max(0, int(after_min  or 0))
+    t_from = alert_time - timedelta(minutes=before)
+    t_to   = alert_time + timedelta(minutes=after)
+    # ISO 8601 不带时区, 节点本地时区使用 (journalctl --since / dmesg --since 都吃这个格式)
+    fmt = "%Y-%m-%d %H:%M:%S"
+    lines = [
+        f"export ALERT_TIME={shlex.quote(alert_time.strftime(fmt))}",
+        f"export ALERT_FROM={shlex.quote(t_from.strftime(fmt))}",
+        f"export ALERT_TO={shlex.quote(t_to.strftime(fmt))}",
+        f"export ALERT_BEFORE_MIN={before}",
+        f"export ALERT_AFTER_MIN={after}",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 @router.post("/scripts/{script_id}/run")
@@ -557,13 +616,20 @@ async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depend
     在指定节点上并行执行诊断脚本, 通过 SSE 流式返回每节点结果。
 
     返回 text/event-stream, 每条事件形如:
-      data: {"type":"start","total":3}\\n\\n
+      data: {"type":"start","run_id":"...","total":3}\\n\\n
       data: {"type":"result","node_id":1,"hostname":"slave-01",...}\\n\\n
       data: {"type":"end"}\\n\\n
+
+    终止: POST /api/diagnose/scripts/runs/{run_id}/cancel
 
     密码处理:
       - ssh_password 为空 或 ******** 时, 使用已保存的凭据
       - 非空且非占位符时, 视为新密码, 执行成功后自动保存到 ssh_credentials.json
+
+    告警时间窗:
+      - 传入 alert_time + range_before_min/range_after_min 时, 脚本前会插入
+        export ALERT_TIME=... ALERT_FROM=... ALERT_TO=..., 脚本可用这些变量
+        过滤 journalctl/dmesg 等日志
     """
     script = db.query(DiagScript).filter(DiagScript.id == script_id).first()
     if not script:
@@ -593,10 +659,26 @@ async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depend
     if not nodes_snapshot:
         raise HTTPException(status_code=400, detail="请选择目标节点或填写目标 IP")
     total = len(nodes_snapshot)
-    script_content = script.script_content
+
+    # 把告警时间窗作为环境变量注入脚本头部
+    env_prefix = _build_env_prefix(req.alert_time, req.range_before_min, req.range_after_min)
+    script_content = env_prefix + script.script_content
     script_timeout = script.timeout
     ssh_user = req.ssh_user
     ssh_port = req.ssh_port
+
+    # 注册运行状态用于「终止」
+    run_id = uuid.uuid4().hex[:12]
+    state = _make_run_state()
+    with _RUNS_LOCK:
+        _ACTIVE_RUNS[run_id] = state
+
+    def _register_client(c):
+        with state["lock"]:
+            state["clients"].append(c)
+
+    def _is_cancelled() -> bool:
+        return state["cancel"].is_set()
 
     async def _stream():
         loop = asyncio.get_event_loop()
@@ -605,9 +687,17 @@ async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depend
         def _emit(item: dict):
             return f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
 
-        yield _emit({"type": "start", "total": total, "script_id": script_id, "script_name": script.name})
+        yield _emit({
+            "type": "start",
+            "run_id": run_id,
+            "total": total,
+            "script_id": script_id,
+            "script_name": script.name,
+            "alert_time": req.alert_time.isoformat() if req.alert_time else None,
+            "alert_window_min": [req.range_before_min, req.range_after_min] if req.alert_time else None,
+        })
 
-        async def _run_one(node_id: int, hostname: str, host: Optional[str]):
+        async def _run_one(node_id: Optional[int], hostname: str, host: Optional[str]):
             if not host:
                 payload = {
                     "type": "result",
@@ -616,6 +706,15 @@ async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depend
                     "stderr": "节点未配置控制面 IP (ctrl_ip), 无法 SSH",
                     "exit_code": -1,
                 }
+            elif _is_cancelled():
+                # 终止时尚未排到的节点直接 short-circuit, 不发起连接
+                payload = {
+                    "type": "result",
+                    "node_id": node_id, "hostname": hostname, "host": host,
+                    "success": False, "stdout": "",
+                    "stderr": "[已取消, 未执行]",
+                    "exit_code": -3,
+                }
             else:
                 try:
                     res = await loop.run_in_executor(
@@ -623,6 +722,7 @@ async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depend
                         run_ssh_command,
                         host, ssh_port, ssh_user, password,
                         script_content, script_timeout,
+                        _is_cancelled, _register_client,
                     )
                 except Exception as e:
                     res = {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1}
@@ -639,13 +739,309 @@ async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depend
 
         # 按完成顺序流式返回
         success_count = 0
-        for _ in range(total):
-            item = await queue.get()
-            if item.get("success"):
-                success_count += 1
-            yield _emit(item)
+        try:
+            for _ in range(total):
+                item = await queue.get()
+                if item.get("success"):
+                    success_count += 1
+                yield _emit(item)
 
-        yield _emit({"type": "end", "total": total, "success": success_count})
+            yield _emit({
+                "type": "end",
+                "run_id": run_id,
+                "total": total,
+                "success": success_count,
+                "cancelled": _is_cancelled(),
+            })
+        finally:
+            with _RUNS_LOCK:
+                _ACTIVE_RUNS.pop(run_id, None)
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+@router.post("/scripts/runs/{run_id}/cancel")
+def cancel_run(run_id: str):
+    """终止正在执行的诊断脚本运行: 强关 SSH, 让阻塞的读取立刻退出。"""
+    ok = _cancel_run(run_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="未找到该运行 (可能已结束)")
+    return {"message": "终止信号已发送", "run_id": run_id}
+
+
+@router.get("/scripts/runs/active")
+def list_active_runs():
+    """返回当前活跃运行 (调试用)"""
+    with _RUNS_LOCK:
+        return {"runs": list(_ACTIVE_RUNS.keys())}
+
+
+class PickFolderRequest(BaseModel):
+    initial: str = ""
+
+
+@router.post("/pick-folder")
+def pick_folder(req: PickFolderRequest):
+    """
+    开发模式用的目录选择对话框 (subprocess 起 tkinter, 避开 FastAPI 线程池里 tk 必须主线程的坑)。
+    生产 (pywebview) 模式前端会先尝试 window.pywebview.api.pick_folder(), 走不通才落到这里。
+    PyInstaller 冻结模式下 sys.executable 不是 Python 解释器, 不能 -c 启动, 直接 400。
+    """
+    import sys
+    import subprocess
+    if getattr(sys, "frozen", False):
+        raise HTTPException(
+            status_code=400,
+            detail="冻结模式请用 window.pywebview.api.pick_folder() 直接走桌面原生对话框",
+        )
+
+    initial = (req.initial or "").replace("\\", "/").strip()
+    code = (
+        "import sys, tkinter as tk\n"
+        "from tkinter import filedialog\n"
+        "r = tk.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
+        f"p = filedialog.askdirectory(title='选择日志导出目录', initialdir={initial!r})\n"
+        "r.destroy()\n"
+        "sys.stdout.write(p or '')\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=600,
+            encoding="utf-8", errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="目录选择超时 (10 分钟未确认)")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"打开目录对话框失败: {e}")
+
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"目录对话框子进程失败 (exit={proc.returncode}): {proc.stderr.strip()}",
+        )
+    path = (proc.stdout or "").strip()
+    # 规范化分隔符 (Windows 习惯反斜杠)
+    if path and os.name == "nt":
+        path = path.replace("/", "\\")
+    return {"path": path}
+
+
+# ─────────────────────────────────────────────
+#  日志导出: SSH 到目标, 按脚本采集 stdout 落盘到本地目录
+# ─────────────────────────────────────────────
+
+class LogExportRequest(BaseModel):
+    target_host: str               # SSH 目标 IP / 主机名
+    ssh_port: int = 22
+    ssh_user: str = "root"
+    ssh_password: str = ""         # 空或 ******** → 用已保存凭据
+    script_ids: List[int]          # 选中的 log_export 脚本 id (DiagScript.id, script_tab=log_export)
+    output_dir: str                # Windows 本地目录, 例如 D:\logs\export
+    alert_time: Optional[datetime] = None
+    range_before_min: int = 0
+    range_after_min: int = 0
+
+
+def _safe_filename(name: str) -> str:
+    """把脚本/分类名规范成安全的文件名片段"""
+    cleaned = re.sub(r'[^\w\-_.一-鿿]+', '_', name.strip())
+    return cleaned.strip('_') or "untitled"
+
+
+@router.post("/log-export/run")
+async def run_log_export(req: LogExportRequest):
+    """
+    日志导出: 对单个目标 SSH 顺序执行多个采集脚本, 每个脚本 stdout 落地到一个 .log 文件,
+    SSE 流式回报进度。支持 run_id 取消、告警时间窗。
+
+    输出目录结构:
+      {output_dir}/{timestamp}/{target_host}/{category}-{name}.log
+    """
+    if not req.target_host.strip():
+        raise HTTPException(status_code=400, detail="请填写目标 IP / 主机名")
+    if not req.script_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个采集脚本")
+    if not req.output_dir.strip():
+        raise HTTPException(status_code=400, detail="请填写输出目录")
+
+    # 解析密码
+    password = cred_service.resolve_password(req.ssh_password)
+    if not password:
+        raise HTTPException(status_code=400, detail="未提供密码且无已保存凭据")
+    if req.ssh_password and req.ssh_password != cred_service.PWD_MASK:
+        try: cred_service.save_creds(req.ssh_user, req.ssh_password, req.ssh_port)
+        except Exception: pass
+
+    # 准备输出根目录: {output_dir}/{YYYYmmdd_HHMMSS}/{target_host}
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target_safe = _safe_filename(req.target_host)
+    out_root = os.path.join(req.output_dir, timestamp, target_safe)
+    try:
+        os.makedirs(out_root, exist_ok=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"创建输出目录失败: {e}")
+
+    # 加载选中的脚本(保留前端顺序), 防止 id 不存在
+    db_session = SessionLocal()
+    try:
+        rows = db_session.query(DiagScript).filter(
+            DiagScript.id.in_(req.script_ids),
+            DiagScript.script_tab == "log_export",
+        ).all()
+        by_id = {s.id: s for s in rows}
+        scripts = [by_id[i] for i in req.script_ids if i in by_id]
+    finally:
+        db_session.close()
+    if not scripts:
+        raise HTTPException(status_code=400, detail="选中的脚本不存在 (script_tab 必须为 log_export)")
+
+    env_prefix = _build_env_prefix(req.alert_time, req.range_before_min, req.range_after_min)
+    target_host  = req.target_host.strip()
+    ssh_user     = req.ssh_user
+    ssh_port     = req.ssh_port
+
+    run_id = uuid.uuid4().hex[:12]
+    state = _make_run_state()
+    with _RUNS_LOCK:
+        _ACTIVE_RUNS[run_id] = state
+
+    def _register_client(c):
+        with state["lock"]:
+            state["clients"].append(c)
+
+    def _is_cancelled() -> bool:
+        return state["cancel"].is_set()
+
+    async def _stream():
+        loop = asyncio.get_event_loop()
+
+        def _emit(item: dict):
+            return f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+        yield _emit({
+            "type": "start",
+            "run_id": run_id,
+            "total": len(scripts),
+            "target": target_host,
+            "output_dir": out_root,
+            "alert_time": req.alert_time.isoformat() if req.alert_time else None,
+        })
+
+        try:
+            for s in scripts:
+                if _is_cancelled():
+                    yield _emit({
+                        "type": "result", "script_id": s.id, "name": s.name,
+                        "category": s.category, "mode": s.output_mode or "stdout",
+                        "success": False, "exit_code": -3, "file": None, "size": 0,
+                        "stderr": "[已取消, 未执行]",
+                    })
+                    continue
+
+                script_body = env_prefix + s.script_content
+                mode = (s.output_mode or "stdout").lower()
+
+                # ── files 模式: SSH 跑脚本得到路径清单, SFTP 完整拉文件 ──────────
+                if mode == "files":
+                    # 每个 files 脚本一个独立子目录, 避免不同脚本下文件重名互相覆盖
+                    script_dir = os.path.join(
+                        out_root, f"{_safe_filename(s.category)}-{_safe_filename(s.name)}"
+                    )
+                    try:
+                        res = await loop.run_in_executor(
+                            _SSH_EXECUTOR,
+                            export_files_via_sftp,
+                            target_host, ssh_port, ssh_user, password,
+                            script_body, script_dir, s.timeout,
+                            _is_cancelled, _register_client,
+                        )
+                    except Exception as e:
+                        res = {"discover_error": str(e), "files": []}
+
+                    if res.get("discover_error"):
+                        yield _emit({
+                            "type": "result", "script_id": s.id, "name": s.name,
+                            "category": s.category, "mode": "files",
+                            "success": False, "exit_code": -10,
+                            "file": None, "size": 0,
+                            "stderr": f"发现阶段失败: {res['discover_error']}",
+                        })
+                        continue
+
+                    file_list = res.get("files", [])
+                    if not file_list:
+                        # 没匹配到文件, 也回一条说明
+                        yield _emit({
+                            "type": "result", "script_id": s.id, "name": s.name,
+                            "category": s.category, "mode": "files",
+                            "success": True, "exit_code": 0,
+                            "file": script_dir, "size": 0,
+                            "stderr": "未匹配到任何文件 (脚本输出为空)",
+                        })
+                    else:
+                        for f in file_list:
+                            yield _emit({
+                                "type": "result", "script_id": s.id, "name": s.name,
+                                "category": s.category, "mode": "files",
+                                "success": f["success"],
+                                "exit_code": 0 if f["success"] else -11,
+                                "file": f.get("local"),
+                                "remote": f.get("remote"),
+                                "size": f.get("size", 0),
+                                "stderr": f.get("error") or "",
+                                "note": f.get("note"),
+                            })
+                    continue
+
+                # ── stdout 模式 (默认): 跑脚本, stdout 落一个文件 ────────────────
+                try:
+                    res = await loop.run_in_executor(
+                        _SSH_EXECUTOR,
+                        run_ssh_command,
+                        target_host, ssh_port, ssh_user, password,
+                        script_body, s.timeout,
+                        _is_cancelled, _register_client,
+                    )
+                except Exception as e:
+                    res = {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1}
+
+                filename = f"{_safe_filename(s.category)}-{_safe_filename(s.name)}.log"
+                fpath = os.path.join(out_root, filename)
+                file_size = 0
+                file_err: Optional[str] = None
+                try:
+                    with open(fpath, "w", encoding="utf-8", newline="") as f:
+                        f.write(res.get("stdout") or "")
+                        if res.get("stderr"):
+                            f.write("\n\n=== STDERR ===\n")
+                            f.write(res["stderr"])
+                    file_size = os.path.getsize(fpath)
+                except Exception as e:
+                    file_err = str(e)
+
+                yield _emit({
+                    "type": "result",
+                    "script_id": s.id,
+                    "name": s.name,
+                    "category": s.category,
+                    "mode": "stdout",
+                    "success": res.get("success", False) and not file_err,
+                    "exit_code": res.get("exit_code", -1),
+                    "file": fpath if not file_err else None,
+                    "size": file_size,
+                    "stderr": file_err or res.get("stderr") or "",
+                })
+
+            yield _emit({
+                "type": "end",
+                "run_id": run_id,
+                "output_dir": out_root,
+                "cancelled": _is_cancelled(),
+            })
+        finally:
+            with _RUNS_LOCK:
+                _ACTIVE_RUNS.pop(run_id, None)
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
