@@ -4,8 +4,13 @@ PXE 部署 API v2 - 鲲鹏集群 22 节点三平面部署
 
 import asyncio
 import functools
+import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+
+# 规划自动生成的主机名模板: master-01 / slave-12 / subswath-02 / gstorage-01 / acquisition-03
+# 两位以上数字, 严格区分 demo seed 的 master-1 / slave-3 (单位数字, 保留)
+_PLAN_HOSTNAME_RE = re.compile(r'^(master|slave|subswath|gstorage|acquisition)-\d{2,}$')
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from fastapi.responses import PlainTextResponse
@@ -422,9 +427,9 @@ def regenerate_nodes_json(req: RegenerateRequest, db: Session = Depends(get_db))
 
     return {
         "message": (
-            f"nodes.json 已更新: 新增 {len(added_hns)} / 更新 {len(updated_hns)} / "
-            f"删除 {len(removed_hns)} (节点管理: 新建 {db_stats['created']} 离线 / "
-            f"删除 {db_stats['deleted']})"
+            f"nodes.json: 新增 {len(added_hns)} / 更新 {len(updated_hns)} / "
+            f"删除 {len(removed_hns)}  ‖  节点管理: 新建 {db_stats['created']} 离线 / "
+            f"更新 {db_stats['updated']} / 删除规划残留 {db_stats['deleted']}"
         ),
         "added":   sorted(added_hns),
         "updated": sorted(updated_hns),
@@ -435,10 +440,12 @@ def regenerate_nodes_json(req: RegenerateRequest, db: Session = Depends(get_db))
 
 def _sync_nodes_json_to_db_impl(db: Session) -> dict:
     """
-    将 nodes.json 中的节点 upsert 到 DB:
-      - 新节点 → 创建，status=offline
-      - 已存在节点 → 仅更新规划字段（IP/MAC/role），不改状态
-    不删除任何节点，删除操作由用户在「节点管理」手动执行。
+    将 nodes.json 同步到 DB, 以「nodes.json 是规划唯一真实来源」为原则:
+      - nodes.json 中的节点 → upsert (新建/更新)
+      - DB 中匹配规划主机名模板 (master-01 / slave-12 …) 但不在 nodes.json 中
+        → 删除 (清理上一次规划残留)
+      - DB 中不匹配模板的主机名 (demo seed: master-1; 手动添加: 自定义名称)
+        → 一律保留, 规划不会动它们
     """
     import logging
     log = logging.getLogger("pxe.sync")
@@ -446,11 +453,38 @@ def _sync_nodes_json_to_db_impl(db: Session) -> dict:
     nodes_json = pxe_service_v2.read_nodes_json()
     created_list: list = []
     updated_list: list = []
+    deleted_list: list = []
     skipped_list: list = []
 
-    log.info(f"[sync] nodes.json 共 {len(nodes_json)} 个键 (含元数据)")
-    print(f"[sync] nodes.json 共 {len(nodes_json)} 个键")
+    # ── 1. 收集本次规划中的主机名集合 ────────────────────────────
+    plan_hostnames: set = set()
+    for mac, node in nodes_json.items():
+        if mac.startswith("_") or not isinstance(node, dict):
+            continue
+        hn = node.get("hostname_new")
+        if hn:
+            plan_hostnames.add(hn)
 
+    log.info(f"[sync] nodes.json 共 {len(plan_hostnames)} 个规划节点")
+    print(f"[sync] nodes.json 共 {len(plan_hostnames)} 个规划节点")
+
+    # ── 2. 清理 DB 中"规划残留": 主机名像 master-01 / slave-12 但不在本次规划里 ──
+    try:
+        for existing in db.query(Node).all():
+            hn = existing.hostname or ""
+            if _PLAN_HOSTNAME_RE.match(hn) and hn not in plan_hostnames:
+                deleted_list.append(hn)
+                db.delete(existing)
+        if deleted_list:
+            db.flush()
+            print(f"[sync] 清理规划残留: {deleted_list}")
+    except Exception as e:
+        log.exception(f"[sync] 清理残留失败: {e}")
+        print(f"[sync][prune error] {e}")
+        db.rollback()
+        raise
+
+    # ── 3. upsert 本次规划节点 ────────────────────────────────────
     for mac, node in nodes_json.items():
         if mac.startswith("_"):
             continue
@@ -499,16 +533,23 @@ def _sync_nodes_json_to_db_impl(db: Session) -> dict:
         raise
 
     total_in_db = db.query(Node).count()
-    print(f"[sync] OK: created={len(created_list)} updated={len(updated_list)} skipped={len(skipped_list)} db_total={total_in_db}")
-    log.info(f"[sync] OK: created={len(created_list)} updated={len(updated_list)} db_total={total_in_db}")
+    print(
+        f"[sync] OK: created={len(created_list)} updated={len(updated_list)} "
+        f"deleted={len(deleted_list)} skipped={len(skipped_list)} db_total={total_in_db}"
+    )
+    log.info(
+        f"[sync] OK: created={len(created_list)} updated={len(updated_list)} "
+        f"deleted={len(deleted_list)} db_total={total_in_db}"
+    )
 
     return {
         "created": len(created_list),
         "updated": len(updated_list),
-        "deleted": 0,
+        "deleted": len(deleted_list),
         "skipped": skipped_list,
         "created_hostnames": created_list,
         "updated_hostnames": updated_list,
+        "deleted_hostnames": deleted_list,
         "db_total": total_in_db,
     }
 
@@ -520,6 +561,83 @@ def sync_nodes_json_to_db(db: Session = Depends(get_db)):
     return {
         "message": f"已同步 (新建 {stats['created']} 离线, 更新 {stats['updated']} 保留状态)",
         **stats,
+    }
+
+
+@router.get("/debug-state")
+def debug_state(db: Session = Depends(get_db)):
+    """
+    诊断端点: 一次返回 nodes.json 内容、DB 节点列表、DB 表实际列名。
+    用于排查"应用规划后节点管理为空"这类同步问题。
+    在浏览器地址栏直接打开 http://<host>:<port>/api/pxe/debug-state 即可看 JSON。
+    """
+    from sqlalchemy import inspect, text
+    from config import DATABASE_PATH
+
+    # 1. nodes.json 现状
+    try:
+        nodes_json = pxe_service_v2.read_nodes_json()
+        nj_hostnames = []
+        for mac, node in nodes_json.items():
+            if mac.startswith("_") or not isinstance(node, dict):
+                continue
+            hn = node.get("hostname_new")
+            if hn:
+                nj_hostnames.append({"mac": mac, "hostname": hn, "role": node.get("role")})
+    except Exception as e:
+        nj_hostnames = []
+        nodes_json_error = str(e)
+    else:
+        nodes_json_error = None
+
+    # 2. DB 中 nodes 表的实际列
+    insp = inspect(db.bind)
+    try:
+        cols = [c["name"] for c in insp.get_columns("nodes")]
+    except Exception as e:
+        cols = []
+        cols_error = str(e)
+    else:
+        cols_error = None
+
+    # 3. DB 中所有节点
+    try:
+        all_nodes = db.query(Node).all()
+        db_nodes = [
+            {
+                "id": n.id, "hostname": n.hostname, "node_type": n.node_type,
+                "status": n.status, "ctrl_ip": n.ctrl_ip, "bmc_ip": n.bmc_ip,
+            }
+            for n in all_nodes
+        ]
+    except Exception as e:
+        db_nodes = []
+        db_error = str(e)
+    else:
+        db_error = None
+
+    # 4. 用底层 SQL 再 count 一次（绕开 ORM 验证）
+    try:
+        raw_count = db.execute(text("SELECT COUNT(*) FROM nodes")).scalar()
+    except Exception as e:
+        raw_count = f"error: {e}"
+
+    return {
+        "database_path": str(DATABASE_PATH),
+        "nodes_json_path": str(pxe_service_v2.nodes_json_path),
+        "nodes_json": {
+            "entries": len(nj_hostnames),
+            "hostnames": nj_hostnames,
+            "error": nodes_json_error,
+        },
+        "db": {
+            "raw_count": raw_count,
+            "orm_count": len(db_nodes),
+            "columns": cols,
+            "columns_error": cols_error,
+            "nodes": db_nodes,
+            "error": db_error,
+        },
     }
 
 

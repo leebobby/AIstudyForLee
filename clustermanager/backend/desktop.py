@@ -125,7 +125,11 @@ def main():
         min_size=(1024, 700),
         resizable=True,
     )
-    webview.start()
+    # 开启 DevTools: 在窗口内按 F12 / Ctrl+Shift+I 打开开发者工具,
+    # 可以看到 console.log / Network 面板 (排查 API 返回值)
+    # 关闭 DevTools 不影响业务, 上线后可改为 debug=False
+    devtools_enabled = os.environ.get("CLUSTER_MANAGER_DEVTOOLS", "1") != "0"
+    webview.start(debug=devtools_enabled)
 
 
 if __name__ == "__main__":

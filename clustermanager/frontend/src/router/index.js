@@ -25,12 +25,13 @@ const routes = [
     component: () => import('@/views/Alerts.vue'),
     meta: { title: '告警中心' }
   },
-  {
-    path: '/patrol',
-    name: 'Patrol',
-    component: () => import('@/views/Patrol.vue'),
-    meta: { title: '巡检管理' }
-  },
+  // 巡检管理暂未实现, 先注释掉, 后续想清楚交互再恢复
+  // {
+  //   path: '/patrol',
+  //   name: 'Patrol',
+  //   component: () => import('@/views/Patrol.vue'),
+  //   meta: { title: '巡检管理' }
+  // },
   {
     path: '/diagnose',
     name: 'Diagnose',

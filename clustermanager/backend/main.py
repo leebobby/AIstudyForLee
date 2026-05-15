@@ -33,6 +33,9 @@ def _run_migrations():
         "ALTER TABLE nodes ADD COLUMN nfs_export_ip VARCHAR(45)",
         "ALTER TABLE nodes ADD COLUMN nfs_exports  VARCHAR(200)",
         "ALTER TABLE nodes ADD COLUMN extra_pkgs   VARCHAR(200)",
+        # 防御: 老库可能缺这两列, sync 在 INSERT 时会因为列不存在静默失败
+        "ALTER TABLE nodes ADD COLUMN ctrl_status VARCHAR(20) DEFAULT 'offline'",
+        "ALTER TABLE nodes ADD COLUMN data_status VARCHAR(20) DEFAULT 'offline'",
     ]
     with engine.connect() as conn:
         for sql in migrations:
@@ -109,8 +112,14 @@ if os.path.isdir(STATIC_DIR):
         )
 
     # SPA 入口：所有其他路径返回 index.html（Vue Router 客户端路由）
+    # 重要：必须显式排除 /api 和 /iso, 否则贪婪 path 匹配会优先于
+    # FastAPI 的 redirect_slashes, 把 GET /api/nodes 这种无尾斜杠的请求
+    # 直接兜底成 HTML, 前端 axios 拿到 HTML 解析失败 → 节点表永远是空
+    from fastapi import HTTPException as _HTTPException
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
+        if full_path.startswith(("api/", "iso/")):
+            raise _HTTPException(status_code=404)
         index = os.path.join(STATIC_DIR, "index.html")
         return FileResponse(index)
 

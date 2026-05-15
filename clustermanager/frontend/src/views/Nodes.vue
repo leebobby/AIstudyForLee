@@ -25,6 +25,9 @@
             <el-button type="warning" @click="forceSyncFromJson" :loading="syncing">
               从规划重新同步
             </el-button>
+            <el-button type="info" @click="openDebug">
+              诊断
+            </el-button>
             <el-button type="success" @click="openAdd">
               <el-icon><Plus /></el-icon>
               新增节点
@@ -272,6 +275,65 @@
         </div>
       </div>
     </el-dialog>
+
+    <!-- ══ 诊断面板 ══ -->
+    <el-dialog v-model="debugDialogVisible" title="同步诊断" width="900px" top="5vh">
+      <div v-if="debugLoading" style="padding:24px;text-align:center;color:#a0a0a0">加载中...</div>
+      <div v-else-if="debugData" class="debug-panel">
+        <el-alert
+          :type="debugData.db.raw_count === debugData.nodes_json.entries ? 'success' : 'warning'"
+          :title="`nodes.json: ${debugData.nodes_json.entries} 个节点 | DB(SQL): ${debugData.db.raw_count} | DB(ORM): ${debugData.db.orm_count}`"
+          :closable="false"
+          show-icon
+          style="margin-bottom:14px"
+        />
+        <div class="debug-paths">
+          <div><b>数据库文件</b>：<code>{{ debugData.database_path }}</code></div>
+          <div><b>nodes.json</b>：<code>{{ debugData.nodes_json_path }}</code></div>
+        </div>
+
+        <el-collapse>
+          <el-collapse-item :title="`nodes.json 中的 ${debugData.nodes_json.entries} 个节点`" name="nj">
+            <el-table :data="debugData.nodes_json.hostnames" size="small" max-height="220">
+              <el-table-column prop="hostname" label="主机名" width="160" />
+              <el-table-column prop="role" label="角色" width="120" />
+              <el-table-column prop="mac" label="MAC" />
+            </el-table>
+          </el-collapse-item>
+
+          <el-collapse-item :title="`DB 中的 ${debugData.db.orm_count} 个节点 (ORM 解析后)`" name="db">
+            <el-table :data="debugData.db.nodes" size="small" max-height="220">
+              <el-table-column prop="id" label="ID" width="60" />
+              <el-table-column prop="hostname" label="主机名" width="140" />
+              <el-table-column prop="node_type" label="类型" width="100" />
+              <el-table-column prop="status" label="状态" width="80" />
+              <el-table-column prop="ctrl_ip" label="ctrl_ip" />
+              <el-table-column prop="bmc_ip" label="bmc_ip" />
+            </el-table>
+            <div v-if="debugData.db.error" class="debug-err">DB 错误: {{ debugData.db.error }}</div>
+          </el-collapse-item>
+
+          <el-collapse-item :title="`nodes 表实际列 (${debugData.db.columns.length})`" name="cols">
+            <code style="word-break:break-all;color:#8b949e">{{ debugData.db.columns.join(', ') }}</code>
+            <div v-if="debugData.db.columns_error" class="debug-err">{{ debugData.db.columns_error }}</div>
+          </el-collapse-item>
+        </el-collapse>
+
+        <div v-if="debugData.db.raw_count !== debugData.nodes_json.entries" class="debug-hint">
+          <strong>判读：</strong>
+          <ul>
+            <li v-if="debugData.db.raw_count === 0">DB 真的是空的——sync 没有写入任何节点。可能原因：sync 调用根本没跑（旧后端未重启）、或 sync 内每条都抛了异常（看后端控制台 [sync][error] 日志）</li>
+            <li v-else-if="debugData.db.raw_count !== debugData.db.orm_count">SQL count 和 ORM count 对不上——response_model 验证可能因某节点字段不合规失败</li>
+            <li v-else>DB 有数据但前端没显示——刷新页面或检查 GET /api/nodes 返回</li>
+          </ul>
+        </div>
+      </div>
+      <div v-else class="debug-err">加载诊断信息失败</div>
+      <template #footer>
+        <el-button @click="loadDebug" :loading="debugLoading">重新加载</el-button>
+        <el-button @click="debugDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -409,6 +471,27 @@ const loadNodes = async () => {
   }
 }
 
+// ── 诊断面板 ────────────────────────────────────────────────
+const debugDialogVisible = ref(false)
+const debugLoading = ref(false)
+const debugData = ref(null)
+const openDebug = () => {
+  debugDialogVisible.value = true
+  loadDebug()
+}
+const loadDebug = async () => {
+  debugLoading.value = true
+  try {
+    const res = await axios.get('/api/pxe/debug-state')
+    debugData.value = res.data
+  } catch (e) {
+    debugData.value = null
+    ElMessage.error('加载诊断失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    debugLoading.value = false
+  }
+}
+
 // 从 pxe_data/nodes.json 强制同步到 DB (作为 IP 规划落库的应急/手动入口)
 const syncing = ref(false)
 const forceSyncFromJson = async () => {
@@ -417,9 +500,12 @@ const forceSyncFromJson = async () => {
     const res = await axios.post('/api/pxe/nodes-json/sync-to-db')
     const d = res.data || {}
     ElMessage.success(
-      `同步完成: 新建 ${d.created || 0} / 更新 ${d.updated || 0}, ` +
-      `数据库共 ${d.db_total || 0} 个节点`
+      `同步完成: 新建 ${d.created || 0} / 更新 ${d.updated || 0} / ` +
+      `清理残留 ${d.deleted || 0}, 数据库共 ${d.db_total || 0} 个节点`
     )
+    if (d.deleted && d.deleted_hostnames?.length) {
+      console.warn('[sync] 清理规划残留:', d.deleted_hostnames)
+    }
     if (d.skipped && d.skipped.length) {
       console.warn('[sync] 跳过的条目:', d.skipped)
       ElMessage.warning(`有 ${d.skipped.length} 个条目被跳过, 详见控制台`)
@@ -477,6 +563,13 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
 }
+.debug-panel { font-size: 13px; }
+.debug-paths { padding: 8px 12px; background: #0d1b2e; border-radius: 4px; margin-bottom: 12px; line-height: 1.8; }
+.debug-paths code { color: #79c0ff; font-size: 12px; }
+.debug-err { color: #ff7b7b; margin-top: 8px; font-size: 12px; }
+.debug-hint { margin-top: 12px; padding: 10px 14px; background: #2a1f0a; border-left: 3px solid #e0a64b; border-radius: 4px; }
+.debug-hint ul { margin: 6px 0 0 0; padding-left: 22px; color: #d0d0d0; }
+.debug-hint li { margin: 4px 0; }
 
 .header-actions {
   display: flex;

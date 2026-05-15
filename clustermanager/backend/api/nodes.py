@@ -99,7 +99,7 @@ class NodeNetworkUpdate(BaseModel):
     data_protocol: Optional[str] = None
 
 
-@router.get("/", response_model=List[NodeResponse])
+@router.get("", response_model=List[NodeResponse])
 def get_nodes(
     node_type: Optional[str] = None,
     status: Optional[str] = None,
@@ -114,6 +114,60 @@ def get_nodes(
     return query.all()
 
 
+# ── 静态路径必须放在 /{node_id} 之前, 否则会被吃成无效 int ───────────────────
+@router.get("/masters", response_model=List[NodeResponse])
+def get_master_nodes(db: Session = Depends(get_db)):
+    """获取所有 Master 节点"""
+    return db.query(Node).filter(Node.node_type == 'master').all()
+
+
+@router.get("/slaves", response_model=List[NodeResponse])
+def get_slave_nodes(db: Session = Depends(get_db)):
+    """获取所有 Slave 节点"""
+    return db.query(Node).filter(Node.node_type == 'slave').all()
+
+
+@router.get("/topology")
+def get_topology(db: Session = Depends(get_db)):
+    """获取三平面网络拓扑数据"""
+    nodes = db.query(Node).all()
+
+    topology = {"masters": [], "slaves": [], "links": []}
+
+    for node in nodes:
+        node_data = {
+            "id": node.id,
+            "hostname": node.hostname,
+            "node_type": node.node_type,
+            "status": node.status,
+            "planes": {
+                "management": {
+                    "ip": node.mgmt_ip,
+                    "mac": node.mgmt_mac,
+                    "bmc_ip": node.bmc_ip,
+                    "status": node.status,
+                },
+                "control": {
+                    "ip": node.ctrl_ip,
+                    "mac": node.ctrl_mac,
+                    "status": node.ctrl_status,
+                },
+                "data": {
+                    "ip": node.data_ip,
+                    "mac": node.data_mac,
+                    "status": node.data_status,
+                    "protocol": node.data_protocol,
+                },
+            },
+        }
+        if node.node_type == 'master':
+            topology["masters"].append(node_data)
+        elif node.node_type == 'slave':
+            topology["slaves"].append(node_data)
+
+    return topology
+
+
 @router.get("/{node_id}", response_model=NodeResponse)
 def get_node(node_id: int, db: Session = Depends(get_db)):
     """获取单个节点详情"""
@@ -123,7 +177,7 @@ def get_node(node_id: int, db: Session = Depends(get_db)):
     return node
 
 
-@router.post("/", response_model=NodeResponse)
+@router.post("", response_model=NodeResponse)
 def create_node(node: NodeCreate, db: Session = Depends(get_db)):
     """创建新节点"""
     db_node = Node(**node.dict())
@@ -177,59 +231,3 @@ def delete_node(node_id: int, db: Session = Depends(get_db)):
     return {"message": "节点已删除"}
 
 
-@router.get("/masters", response_model=List[NodeResponse])
-def get_master_nodes(db: Session = Depends(get_db)):
-    """获取所有 Master 节点"""
-    return db.query(Node).filter(Node.node_type == 'master').all()
-
-
-@router.get("/slaves", response_model=List[NodeResponse])
-def get_slave_nodes(db: Session = Depends(get_db)):
-    """获取所有 Slave 节点"""
-    return db.query(Node).filter(Node.node_type == 'slave').all()
-
-
-@router.get("/topology")
-def get_topology(db: Session = Depends(get_db)):
-    """获取三平面网络拓扑数据"""
-    nodes = db.query(Node).all()
-
-    topology = {
-        "masters": [],
-        "slaves": [],
-        "links": []
-    }
-
-    for node in nodes:
-        node_data = {
-            "id": node.id,
-            "hostname": node.hostname,
-            "node_type": node.node_type,
-            "status": node.status,
-            "planes": {
-                "management": {
-                    "ip": node.mgmt_ip,
-                    "mac": node.mgmt_mac,
-                    "bmc_ip": node.bmc_ip,
-                    "status": node.status
-                },
-                "control": {
-                    "ip": node.ctrl_ip,
-                    "mac": node.ctrl_mac,
-                    "status": node.ctrl_status
-                },
-                "data": {
-                    "ip": node.data_ip,
-                    "mac": node.data_mac,
-                    "status": node.data_status,
-                    "protocol": node.data_protocol
-                }
-            }
-        }
-
-        if node.node_type == 'master':
-            topology["masters"].append(node_data)
-        elif node.node_type == 'slave':
-            topology["slaves"].append(node_data)
-
-    return topology

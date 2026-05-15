@@ -1001,8 +1001,10 @@ async function applyPlanToNodesJson() {
       `将按当前规划保存到 nodes.json: ${summary}\n\n规则:\n` +
       `- 同名节点保留已填写的真实 MAC, IP 字段按本次规划重算\n` +
       `- 新增节点追加 (默认占位 MAC)\n` +
-      `- 旧规划中存在但本次不在的节点将被删除 (新规划为 source of truth)\n` +
-      `- 节点管理同步: 新增节点离线显示; 手动添加的节点不受影响`,
+      `- 旧规划中存在但本次不在的节点将被删除 (新规划为唯一来源)\n` +
+      `- 节点管理同步:\n` +
+      `    · 名称符合规划模板 (master-01 / slave-12 等) 但不在本次规划 → 一并删除\n` +
+      `    · 单数字 demo 节点 (master-1) 和自定义主机名 → 不受影响`,
       '确认应用规划',
       { type: 'warning', confirmButtonText: '确认应用', cancelButtonText: '取消' }
     )
@@ -1021,9 +1023,11 @@ async function applyPlanToNodesJson() {
     console.log('[apply] sync-to-db response:', syncData)
     const dbCreated = syncData.created ?? 0
     const dbUpdated = syncData.updated ?? 0
+    const dbDeleted = syncData.deleted ?? 0
     const dbTotal   = syncData.db_total ?? 0
     const skipped   = syncData.skipped || []
     if (skipped.length) console.warn('[apply] 跳过条目:', skipped)
+    if (dbDeleted) console.warn('[apply] 清理规划残留:', syncData.deleted_hostnames)
 
     // 刷新预览
     try {
@@ -1037,7 +1041,8 @@ async function applyPlanToNodesJson() {
     const removed = data.removed?.length ?? 0
     ElMessage.success(
       `nodes.json: 新增 ${added} / 更新 ${updated} / 删除 ${removed}。` +
-      `节点管理: 新建 ${dbCreated} / 更新 ${dbUpdated}, 当前 DB 共 ${dbTotal} 个节点。`
+      `节点管理: 新建 ${dbCreated} / 更新 ${dbUpdated} / 清理残留 ${dbDeleted}, ` +
+      `当前 DB 共 ${dbTotal} 个节点。`
     )
     if (skipped.length) {
       ElMessage.warning(`有 ${skipped.length} 条记录被跳过未同步, 详见浏览器控制台 [apply] 跳过条目`)

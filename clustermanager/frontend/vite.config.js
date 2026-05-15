@@ -12,6 +12,8 @@ export default defineConfig({
   // 开发服务器：代理 /api 到后端
   server: {
     port: 3000,
+    host: true,
+    allowedHosts: 'all',
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

@@ -31,10 +31,12 @@
           <el-icon><Bell /></el-icon>
           <span>告警中心</span>
         </el-menu-item>
+        <!-- 巡检管理: 暂未实现, 先不展示, 后续想清楚交互再恢复
         <el-menu-item index="/patrol">
           <el-icon><Search /></el-icon>
           <span>巡检管理</span>
         </el-menu-item>
+        -->
         <el-menu-item index="/diagnose">
           <el-icon><FirstAidKit /></el-icon>
           <span>故障诊断</span>
