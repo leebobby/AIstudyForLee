@@ -8,7 +8,13 @@
       "Bash(Select-Object -First 1)",
       "Bash(python -c \"from services.pxe_service import pxe_service_v2\")",
       "Bash(echo \"EXIT:$?\")",
-      "Bash(python -c \"import sys; sys.path.insert\\(0,'.'\\);  from services.pxe_service import pxe_service_v2; print\\('OK'\\)\")"
+      "Bash(python -c \"import sys; sys.path.insert\\(0,'.'\\);  from services.pxe_service import pxe_service_v2; print\\('OK'\\)\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(python -c \"from api import diagnose; from services import diag_service; print\\('OK'\\)\")",
+      "PowerShell($ErrorActionPreference = \"Continue\"; Set-Location \"d:/01.code/00.AIstudy/AIstudyForLee/clustermanager/backend\"; $out = & python -c \"from api import diagnose; from services import diag_service; print\\('OK'\\)\" 2>&1; $out; \"exit=$LASTEXITCODE\")",
+      "PowerShell(Set-Location \"d:/01.code/00.AIstudy/AIstudyForLee/clustermanager/backend\"; $out = & py -c \"import ast; ast.parse\\(open\\('api/diagnose.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('services/diag_service.py', encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\" 2>&1; $out; \"exit=$LASTEXITCODE\")"
     ]
   }
 }
