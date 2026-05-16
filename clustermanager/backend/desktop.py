@@ -80,14 +80,30 @@ def _pick_port(start: int) -> int:
     return start
 
 
-def _wait_for_server(url: str, timeout: float = 30.0) -> bool:
+def _wait_for_server(host: str, port: int, timeout: float = 30.0) -> bool:
+    """
+    用 socket 检测端口是否开放（不走 HTTP，避免防火墙拦截）
+    
+    原因：Windows 防火墙可能会阻止 urllib.request.urlopen() 的 HTTP 请求，
+    但不会阻止 socket 连接。这样更可靠。
+    """
     deadline = time.time() + timeout
+    attempt = 0
     while time.time() < deadline:
+        attempt += 1
         try:
-            urllib.request.urlopen(url, timeout=1).close()
-            return True
-        except Exception:
-            time.sleep(0.2)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            if result == 0:
+                print(f"[desktop] port {host}:{port} is open (attempt #{attempt})")
+                return True
+        except Exception as e:
+            elapsed = time.time() - (deadline - timeout)
+            print(f"[desktop] port check at {elapsed:.1f}s: {type(e).__name__}: {e}")
+        time.sleep(0.2)
+    print(f"[desktop] port {host}:{port} failed to open after {timeout}s")
     return False
 
 
@@ -100,10 +116,9 @@ def main():
     print(f"[desktop] starting backend, bind={BIND_HOST}:{port} (shared={SHARED_MODE})")
     threading.Thread(target=_run_server, args=(port,), daemon=True).start()
 
-    # webview 总是连本地, 即便 uvicorn 绑在 0.0.0.0
-    local_url = f"http://{LOCAL_HOST}:{port}"
-    if not _wait_for_server(f"{local_url}/api/health"):
-        print(f"[desktop][error] backend failed to start at {local_url}", file=sys.stderr)
+    # 用 socket 检测端口是否开放（不走 HTTP，避免防火墙问题）
+    if not _wait_for_server(LOCAL_HOST, port, timeout=30.0):
+        print(f"[desktop][error] backend failed to start at {LOCAL_HOST}:{port}", file=sys.stderr)
         sys.exit(1)
 
     title = "Cluster Manager"
@@ -116,7 +131,7 @@ def main():
         else:
             title = f"Cluster Manager (shared mode, port {port})"
 
-    print(f"[desktop] opening webview window -> {local_url}")
+    print(f"[desktop] opening webview window -> http://{LOCAL_HOST}:{port}")
 
     # 暴露给前端 JS: window.pywebview.api.pick_folder() — 调系统原生目录选择
     # 用于日志导出页"输出目录"的浏览按钮; 浏览器侧 fetch 拿不到绝对路径,
@@ -135,7 +150,7 @@ def main():
 
     webview.create_window(
         title=title,
-        url=local_url,
+        url=f"http://{LOCAL_HOST}:{port}",
         width=1400,
         height=900,
         min_size=(1024, 700),
