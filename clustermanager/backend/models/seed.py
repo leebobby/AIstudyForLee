@@ -54,6 +54,10 @@ def _seed_diag_scripts(db: Session):
                     target_node_type=item.get("target_node_type", "all"),
                     timeout=item.get("timeout", 30),
                     enabled=item.get("enabled", True),
+                    output_mode=item.get("output_mode", "stdout"),
+                    expect_mode=item.get("expect_mode", "exit_code"),
+                    expect_pattern=item.get("expect_pattern", ""),
+                    suggestion=item.get("suggestion", ""),
                 ))
             db.commit()
             print(f"  - 从发布包加载 {len(items)} 个诊断脚本 ({SCRIPTS_BUNDLE_PATH})")

@@ -15,6 +15,18 @@
           </el-button>
         </el-tooltip>
         <input ref="importFileRef" type="file" accept=".json" style="display:none" @change="onImportFile" />
+
+        <el-divider direction="vertical" />
+        <el-tooltip content="把每个脚本导出成一个 .sh 文件（带 #@ 头），用 tab/分类 两级目录组织，便于 VSCode/git 管理复杂脚本" placement="bottom">
+          <el-button size="small" @click="exportToDir" :loading="dirBusy">
+            <el-icon><FolderOpened /></el-icon>&nbsp;导出到目录
+          </el-button>
+        </el-tooltip>
+        <el-tooltip content="扫描目录下所有 .sh（按 tab/分类/名称合并导回）" placement="bottom">
+          <el-button size="small" @click="importFromDir" :loading="dirBusy">
+            <el-icon><FolderAdd /></el-icon>&nbsp;从目录导入
+          </el-button>
+        </el-tooltip>
         <el-tooltip :content="bundleInfo.exists
           ? `发布包: ${bundleInfo.count} 个脚本，更新于 ${formatDate(bundleInfo.mtime)}`
           : '尚未生成发布配置'" placement="bottom">
@@ -35,6 +47,10 @@
       ══════════════════════════════════════ -->
       <el-tab-pane label="业务诊断" name="business">
         <div class="tab-toolbar">
+          <el-button type="success" size="small" @click="openBatchDialog('business')">
+            <el-icon><Stopwatch /></el-icon>&nbsp;一键体检
+          </el-button>
+          <el-divider direction="vertical" />
           <el-button type="primary" size="small" @click="openNewTypeDialog('business')">
             <el-icon><FolderAdd /></el-icon>&nbsp;新建诊断类型
           </el-button>
@@ -89,6 +105,10 @@
       ══════════════════════════════════════ -->
       <el-tab-pane label="硬件诊断" name="hardware">
         <div class="tab-toolbar">
+          <el-button type="success" size="small" @click="openBatchDialog('hardware')">
+            <el-icon><Stopwatch /></el-icon>&nbsp;一键体检
+          </el-button>
+          <el-divider direction="vertical" />
           <el-button type="primary" size="small" @click="openNewTypeDialog('hardware')">
             <el-icon><FolderAdd /></el-icon>&nbsp;新建诊断类型
           </el-button>
@@ -441,6 +461,31 @@
             </el-form-item>
           </el-col>
         </el-row>
+
+        <!-- 判定规则: 仅 business/hardware 诊断脚本用, 把"跑命令"升级成"判结论" -->
+        <template v-if="scriptForm.script_tab !== 'log_export'">
+          <el-form-item label="结果判定">
+            <el-select v-model="scriptForm.expect_mode" style="width:100%">
+              <el-option label="按退出码 (exit 0 = 正常, 否则异常)" value="exit_code" />
+              <el-option label="命中关键字/正则 → 判异常 (如 error|fail|panic)" value="fault_if_match" />
+              <el-option label="命中关键字/正则 → 判正常 (如 active (running))" value="pass_if_match" />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="scriptForm.expect_mode !== 'exit_code'" label="关键字/正则">
+            <el-input v-model="scriptForm.expect_pattern"
+                      placeholder="对 stdout+stderr 做匹配, 大小写不敏感; 支持正则" />
+            <div class="run-ip-hint">
+              {{ scriptForm.expect_mode === 'fault_if_match'
+                 ? '输出里出现该模式即判「异常」, 例: error|timeout|panic'
+                 : '输出里必须出现该模式才判「正常」, 没出现即「异常」, 例: active \\(running\\)' }}
+            </div>
+          </el-form-item>
+          <el-form-item label="处置建议">
+            <el-input v-model="scriptForm.suggestion" type="textarea" :rows="2"
+                      placeholder="可选; 判为异常时显示在体检报告里, 指导运维如何处理" />
+          </el-form-item>
+        </template>
+
         <!-- 仅日志导出脚本支持 output_mode: stdout 把 stdout 落一个文件; files 用 SFTP 拉完整文件 -->
         <el-form-item v-if="scriptForm.script_tab === 'log_export'" label="输出模式">
           <el-radio-group v-model="scriptForm.output_mode">
@@ -580,17 +625,171 @@
         <span v-if="currentRunId" class="run-id-tag">run: {{ currentRunId }}</span>
       </div>
 
-      <div v-for="res in runResults" :key="res.node_id" class="run-result">
+      <div v-for="res in runResults" :key="res.node_id ?? res.host" class="run-result">
         <div class="run-result-title">
           <span>
             {{ res.hostname }}
             <span class="run-host">{{ res.host || '—' }}</span>
           </span>
-          <el-tag size="small" :type="res.success ? 'success' : 'danger'">exit {{ res.exit_code }}</el-tag>
+          <span class="run-verdict-tags">
+            <el-tag size="small" effect="dark" :type="verdictMeta(res.verdict).type">
+              {{ verdictMeta(res.verdict).label }}
+            </el-tag>
+            <el-tag size="small" type="info" effect="plain">exit {{ res.exit_code }}</el-tag>
+          </span>
+        </div>
+        <div v-if="res.verdict === 'fail' && res.suggestion" class="run-suggestion">
+          <el-icon><WarningFilled /></el-icon>&nbsp;处置建议：{{ res.suggestion }}
         </div>
         <pre class="run-stdout">{{ res.stdout || '(无输出)' }}</pre>
         <pre v-if="res.stderr" class="run-stderr">{{ res.stderr }}</pre>
       </div>
+    </el-dialog>
+
+    <!-- ══ 一键体检: 一组目标 × 一组脚本 并发执行 + 汇总报告 ══ -->
+    <el-dialog
+      v-model="batchDialog.visible"
+      :title="`一键体检 — ${batchDialog.tab === 'business' ? '业务诊断' : '硬件诊断'}`"
+      width="900px"
+      :close-on-click-modal="!batchRunning"
+      :close-on-press-escape="!batchRunning"
+      :show-close="!batchRunning"
+      @closed="onBatchDialogClosed"
+    >
+      <el-alert
+        v-if="batchRunning" type="warning" :closable="false" show-icon
+        title="体检进行中, 对话框已锁定. 点「终止」可强制中断所有 SSH"
+        style="margin-bottom:14px"
+      />
+
+      <el-form :model="batchForm" label-width="86px" :disabled="batchRunning">
+        <el-form-item label="目标方式">
+          <el-radio-group v-model="batchForm.target_mode" size="small">
+            <el-radio-button value="ips">手动 IP</el-radio-button>
+            <el-radio-button value="nodes">节点选择</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item :label="batchForm.target_mode === 'ips' ? '目标 IP' : '目标节点'">
+          <el-input
+            v-if="batchForm.target_mode === 'ips'"
+            v-model="batchForm.manual_ips" style="width:420px"
+            placeholder="172.16.3.100（多个用英文逗号分隔）"
+          />
+          <el-select
+            v-else v-model="batchForm.node_ids" multiple collapse-tags
+            style="width:420px" placeholder="选择节点（含离线）"
+          >
+            <el-option
+              v-for="n in nodes" :key="n.id"
+              :label="`${n.hostname} (${n.ctrl_ip || n.mgmt_ip || '无IP'}) [${n.status}]`"
+              :value="n.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="检查范围">
+          <el-select v-model="batchForm.category" style="width:240px" clearable placeholder="全部分类">
+            <el-option label="全部分类" value="" />
+            <el-option v-for="c in batchCategories" :key="c" :label="c" :value="c" />
+          </el-select>
+          <span class="run-ip-hint" style="margin-left:10px">
+            将执行 {{ batchScriptCount }} 个启用脚本 × {{ batchTargetCount }} 个目标
+          </span>
+        </el-form-item>
+        <el-form-item label="SSH 凭据">
+          <el-input v-model="batchForm.ssh_user" placeholder="用户名" style="width:120px" />
+          <el-input v-model="batchForm.ssh_password" type="password" show-password
+                    placeholder="密码" style="width:160px;margin-left:8px" />
+          <el-input v-model.number="batchForm.ssh_port" type="number" min="1" max="65535"
+                    placeholder="端口" style="width:90px;margin-left:8px" />
+          <el-tag v-if="batchCredsLoaded" size="small" type="success" style="margin-left:8px">
+            已保存凭据
+          </el-tag>
+        </el-form-item>
+        <el-form-item label="告警时间">
+          <el-date-picker
+            v-model="batchForm.alert_time" type="datetime"
+            placeholder="可选, 留空表示不限时间" style="width:240px"
+            value-format="YYYY-MM-DDTHH:mm:ss"
+          />
+          <el-button v-if="batchForm.alert_time" size="small" link type="info"
+                     style="margin-left:6px" @click="batchForm.alert_time = null">清除</el-button>
+        </el-form-item>
+        <el-form-item label="查询范围" v-if="batchForm.alert_time">
+          <span class="range-label">前</span>
+          <el-input-number v-model="batchForm.range_before_min" :min="0" :max="1440"
+                           size="small" controls-position="right" style="width:110px" />
+          <span class="range-label">分 · 后</span>
+          <el-input-number v-model="batchForm.range_after_min" :min="0" :max="1440"
+                           size="small" controls-position="right" style="width:110px" />
+          <span class="range-label">分</span>
+        </el-form-item>
+      </el-form>
+
+      <div class="run-action-bar">
+        <el-button
+          v-if="!batchRunning" type="success" @click="executeBatch"
+          :disabled="(batchForm.target_mode === 'nodes' ? !batchForm.node_ids.length : !batchForm.manual_ips.trim()) || !batchScriptCount"
+        >
+          <el-icon><Stopwatch /></el-icon>&nbsp;开始体检
+        </el-button>
+        <el-button v-else type="danger" :loading="batchCancelling" @click="terminateBatch">
+          <el-icon><CircleClose /></el-icon>&nbsp;终止
+        </el-button>
+        <span v-if="batchProgress.total" class="run-progress">
+          已完成 {{ batchResults.length }} / {{ batchProgress.total }}
+        </span>
+        <span v-if="batchRunId" class="run-id-tag">run: {{ batchRunId }}</span>
+      </div>
+
+      <!-- 体检报告: 健康度统计 + 结果(异常置顶) -->
+      <template v-if="batchResults.length">
+        <div class="report-stats">
+          <div class="stat-chip stat-total">检查项 <b>{{ batchResults.length }}</b></div>
+          <div class="stat-chip stat-pass">正常 <b>{{ batchCounts.pass }}</b></div>
+          <div class="stat-chip stat-fail">异常 <b>{{ batchCounts.fail }}</b></div>
+          <div class="stat-chip stat-error">错误 <b>{{ batchCounts.error }}</b></div>
+          <div class="report-health" :class="`health-${batchHealthLevel}`">
+            健康度 {{ batchHealthScore }}%
+          </div>
+        </div>
+
+        <el-table :data="sortedBatchResults" size="small" max-height="380" stripe
+                  :row-class-name="batchRowClass">
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div class="report-expand">
+                <div v-if="row.suggestion" class="run-suggestion" style="border:none">
+                  <el-icon><WarningFilled /></el-icon>&nbsp;处置建议：{{ row.suggestion }}
+                </div>
+                <pre class="run-stdout">{{ row.stdout || '(无输出)' }}</pre>
+                <pre v-if="row.stderr" class="run-stderr">{{ row.stderr }}</pre>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="判定" width="80">
+            <template #default="{ row }">
+              <el-tag size="small" effect="dark" :type="verdictMeta(row.verdict).type">
+                {{ verdictMeta(row.verdict).label }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="category" label="类型" width="110" show-overflow-tooltip />
+          <el-table-column prop="script_name" label="检查项" width="180" show-overflow-tooltip />
+          <el-table-column label="节点" width="180" show-overflow-tooltip>
+            <template #default="{ row }">
+              {{ row.hostname }}<span class="run-host">{{ row.host || '—' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="结论 / 建议" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="row.verdict === 'fail'" class="report-sug">{{ row.suggestion || '命中异常判定规则，展开查看输出' }}</span>
+              <span v-else-if="row.verdict === 'error'" class="report-err">{{ row.stderr || '执行错误' }}</span>
+              <span v-else class="report-ok">正常</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+      <el-empty v-else-if="!batchRunning" description="选择目标后点「开始体检」" :image-size="60" />
     </el-dialog>
   </div>
 </template>
@@ -683,6 +882,9 @@ function defaultForm(tab = 'business', cat = '') {
     timeout: tab === 'log_export' ? 60 : 30,
     enabled: true,
     output_mode: 'stdout',
+    expect_mode: 'exit_code',
+    expect_pattern: '',
+    suggestion: '',
   }
 }
 const scriptForm = ref(defaultForm())
@@ -746,6 +948,16 @@ async function confirmDelete(script) {
   } catch (e) {
     if (e !== 'cancel') ElMessage.error('删除失败')
   }
+}
+
+// ─── 三态判定元信息 ───
+const VERDICT_META = {
+  pass:  { label: '正常', type: 'success' },
+  fail:  { label: '异常', type: 'danger' },
+  error: { label: '错误', type: 'info' },
+}
+function verdictMeta(v) {
+  return VERDICT_META[v] || { label: v || '—', type: 'info' }
 }
 
 // ─── 运行脚本 (流式 SSE + 凭据持久化 + 可终止) ───
@@ -873,12 +1085,15 @@ async function executeScript() {
       }
     }
 
-    const total = endEvent?.total ?? runResults.value.length
-    const ok = endEvent?.success ?? runResults.value.filter(r => r.success).length
+    const total  = endEvent?.total  ?? runResults.value.length
+    const passed = endEvent?.passed ?? runResults.value.filter(r => r.verdict === 'pass').length
+    const failed = endEvent?.failed ?? runResults.value.filter(r => r.verdict === 'fail').length
+    const errored = endEvent?.errored ?? runResults.value.filter(r => r.verdict === 'error').length
+    const summary = `正常 ${passed} · 异常 ${failed} · 错误 ${errored} (共 ${total})`
     if (endEvent?.cancelled) {
-      ElMessage.warning(`已终止: ${ok}/${total} 个节点完成`)
+      ElMessage.warning(`已终止: ${summary}`)
     } else {
-      ElMessage[ok === total ? 'success' : 'warning'](`执行完成: ${ok}/${total} 个节点成功`)
+      ElMessage[(failed === 0 && errored === 0) ? 'success' : 'warning'](`执行完成: ${summary}`)
     }
 
     // 凭据持久化: 仅当用户实际输入了新密码时, 后端会自动保存
@@ -913,6 +1128,187 @@ async function terminateRun() {
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '终止失败')
     cancelling.value = false
+  }
+}
+
+// ─── 一键体检 (批量执行 + 汇总报告) ───
+const batchDialog = ref({ visible: false, tab: 'business' })
+const batchForm = ref({
+  target_mode: 'ips',
+  node_ids: [],
+  manual_ips: '172.16.3.100',
+  ssh_user: 'root',
+  ssh_password: '',
+  ssh_port: 22,
+  category: '',
+  alert_time: null,
+  range_before_min: 5,
+  range_after_min: 10,
+})
+const batchRunning = ref(false)
+const batchCancelling = ref(false)
+const batchRunId = ref('')
+const batchResults = ref([])
+const batchProgress = ref({ total: 0 })
+const batchCredsLoaded = ref(false)
+
+// 当前体检 tab 下、(可选)指定分类内的启用脚本
+const batchCategories = computed(() =>
+  batchDialog.value.tab === 'business' ? businessCategories.value : hardwareCategories.value
+)
+const batchScriptCount = computed(() => scripts.value.filter(s =>
+  s.script_tab === batchDialog.value.tab && s.enabled &&
+  (!batchForm.value.category || s.category === batchForm.value.category)
+).length)
+const batchTargetCount = computed(() =>
+  batchForm.value.target_mode === 'nodes'
+    ? batchForm.value.node_ids.length
+    : batchForm.value.manual_ips.split(',').map(s => s.trim()).filter(Boolean).length
+)
+
+const VERDICT_ORDER = { fail: 0, error: 1, pass: 2 }
+const sortedBatchResults = computed(() =>
+  [...batchResults.value].sort((a, b) =>
+    (VERDICT_ORDER[a.verdict] ?? 9) - (VERDICT_ORDER[b.verdict] ?? 9) ||
+    (a.category || '').localeCompare(b.category || '') ||
+    (a.script_name || '').localeCompare(b.script_name || '')
+  )
+)
+const batchCounts = computed(() => {
+  const c = { pass: 0, fail: 0, error: 0 }
+  for (const r of batchResults.value) c[r.verdict] = (c[r.verdict] || 0) + 1
+  return c
+})
+const batchHealthScore = computed(() => {
+  const n = batchResults.value.length
+  return n ? Math.round((batchCounts.value.pass / n) * 100) : 0
+})
+const batchHealthLevel = computed(() => {
+  const s = batchHealthScore.value
+  return s >= 90 ? 'good' : s >= 60 ? 'warn' : 'bad'
+})
+function batchRowClass({ row }) {
+  return row.verdict === 'fail' ? 'row-fail' : row.verdict === 'error' ? 'row-error' : ''
+}
+
+async function openBatchDialog(tab) {
+  batchDialog.value = { visible: true, tab }
+  batchForm.value.category = ''
+  batchResults.value = []
+  batchProgress.value = { total: 0 }
+  batchRunId.value = ''
+  // 预填已保存凭据
+  try {
+    const res = await axios.get('/api/diagnose/ssh-creds')
+    if (res.data.has_saved) {
+      batchForm.value.ssh_user = res.data.ssh_user || 'root'
+      batchForm.value.ssh_port = res.data.ssh_port || 22
+      batchForm.value.ssh_password = PWD_MASK
+      batchCredsLoaded.value = true
+    } else {
+      batchCredsLoaded.value = false
+    }
+  } catch { batchCredsLoaded.value = false }
+  loadNodes()
+}
+
+function onBatchDialogClosed() {
+  batchResults.value = []
+  batchRunId.value = ''
+  batchRunning.value = false
+  batchCancelling.value = false
+}
+
+async function executeBatch() {
+  const payload = {
+    node_ids: batchForm.value.target_mode === 'nodes' ? batchForm.value.node_ids : [],
+    target_ips: batchForm.value.target_mode === 'ips'
+      ? batchForm.value.manual_ips.split(',').map(s => s.trim()).filter(Boolean)
+      : [],
+    ssh_user: batchForm.value.ssh_user,
+    ssh_password: batchForm.value.ssh_password,
+    ssh_port: Number(batchForm.value.ssh_port) || 22,
+    script_tab: batchDialog.value.tab,
+    category: batchForm.value.category || null,
+    alert_time: batchForm.value.alert_time || null,
+    range_before_min: Number(batchForm.value.range_before_min) || 0,
+    range_after_min: Number(batchForm.value.range_after_min) || 0,
+  }
+  batchRunning.value = true
+  batchCancelling.value = false
+  batchRunId.value = ''
+  batchResults.value = []
+  batchProgress.value = { total: 0 }
+
+  try {
+    const resp = await fetch('/api/diagnose/scripts/batch-run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!resp.ok) {
+      let detail = `HTTP ${resp.status}`
+      try { detail = (await resp.json()).detail || detail } catch {}
+      throw new Error(detail)
+    }
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let endEvent = null
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const chunk = buf.slice(0, idx).trim()
+        buf = buf.slice(idx + 2)
+        if (!chunk.startsWith('data:')) continue
+        const json = chunk.replace(/^data:\s*/, '')
+        if (!json) continue
+        let evt
+        try { evt = JSON.parse(json) } catch { continue }
+        if (evt.type === 'start') {
+          batchProgress.value = { total: evt.total }
+          batchRunId.value = evt.run_id || ''
+        } else if (evt.type === 'result') {
+          batchResults.value.push(evt)
+        } else if (evt.type === 'end') {
+          endEvent = evt
+        }
+      }
+    }
+    const total = endEvent?.total ?? batchResults.value.length
+    const failed = endEvent?.failed ?? batchCounts.value.fail
+    const errored = endEvent?.errored ?? batchCounts.value.error
+    const summary = `正常 ${batchCounts.value.pass} · 异常 ${failed} · 错误 ${errored} (共 ${total})`
+    if (endEvent?.cancelled) {
+      ElMessage.warning(`体检已终止: ${summary}`)
+    } else {
+      ElMessage[(failed === 0 && errored === 0) ? 'success' : 'warning'](`体检完成: ${summary}`)
+    }
+    if (batchForm.value.ssh_password && batchForm.value.ssh_password !== PWD_MASK) {
+      batchForm.value.ssh_password = PWD_MASK
+      batchCredsLoaded.value = true
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '体检失败')
+  } finally {
+    batchRunning.value = false
+    batchCancelling.value = false
+    batchRunId.value = ''
+  }
+}
+
+async function terminateBatch() {
+  if (!batchRunId.value || batchCancelling.value) return
+  batchCancelling.value = true
+  try {
+    await axios.post(`/api/diagnose/scripts/runs/${batchRunId.value}/cancel`)
+    ElMessage.info('终止信号已发送')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '终止失败')
+    batchCancelling.value = false
   }
 }
 
@@ -1130,6 +1526,65 @@ async function onImportFile(event) {
     loadScripts()
   } catch (e) {
     if (e !== 'cancel') ElMessage.error(e.response?.data?.detail || '导入失败')
+  }
+}
+
+// ─── .sh 文件夹包 导入/导出 ───
+const dirBusy = ref(false)
+const LAST_DIR_KEY = 'diag_scripts_dir'
+
+// 通用目录选择: 优先 pywebview 桌面桥, 回落后端 tkinter subprocess
+async function pickFolder(initial) {
+  const native = window.pywebview?.api?.pick_folder
+  if (typeof native === 'function') {
+    try {
+      const p = await native(initial || '')
+      if (p) return p
+    } catch (e) { console.warn('[pickFolder] pywebview 桥失败, 回落后端', e) }
+  }
+  try {
+    const res = await axios.post('/api/diagnose/pick-folder', { initial: initial || '' })
+    return res.data?.path || ''
+  } catch (e) {
+    ElMessage.error('选择目录失败: ' + (e.response?.data?.detail || e.message))
+    return ''
+  }
+}
+
+async function exportToDir() {
+  const dir = await pickFolder(localStorage.getItem(LAST_DIR_KEY) || '')
+  if (!dir) return
+  localStorage.setItem(LAST_DIR_KEY, dir)
+  dirBusy.value = true
+  try {
+    const res = await axios.post('/api/diagnose/scripts/export-dir', { dir })
+    ElMessage.success(`已导出 ${res.data.count} 个脚本到 ${res.data.dir}`)
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '导出失败')
+  } finally {
+    dirBusy.value = false
+  }
+}
+
+async function importFromDir() {
+  const dir = await pickFolder(localStorage.getItem(LAST_DIR_KEY) || '')
+  if (!dir) return
+  localStorage.setItem(LAST_DIR_KEY, dir)
+  try {
+    await ElMessageBox.confirm(
+      `将扫描「${dir}」下所有 .sh 脚本，按 tab/分类/名称合并导入（同名覆盖）。继续？`,
+      '从目录导入', { type: 'warning', confirmButtonText: '导入', cancelButtonText: '取消' }
+    )
+  } catch { return }
+  dirBusy.value = true
+  try {
+    const res = await axios.post('/api/diagnose/scripts/import-dir', { dir, mode: 'merge' })
+    ElMessage.success(`导入完成：新建 ${res.data.created}，更新 ${res.data.updated}`)
+    loadScripts()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '导入失败')
+  } finally {
+    dirBusy.value = false
   }
 }
 
@@ -1423,6 +1878,52 @@ onMounted(() => {
   background: #0f3460;
   color: #fff;
   font-weight: 500;
+}
+.run-verdict-tags { display: flex; gap: 6px; align-items: center; }
+
+/* ─── 一键体检报告 ─── */
+.report-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 14px;
+  flex-wrap: wrap;
+}
+.stat-chip {
+  font-size: 13px;
+  color: #c9d1d9;
+  background: #0f3460;
+  border-radius: 6px;
+  padding: 5px 12px;
+}
+.stat-chip b { font-size: 15px; margin-left: 4px; }
+.stat-pass b { color: #67c23a; }
+.stat-fail b { color: #f56c6c; }
+.stat-error b { color: #909399; }
+.report-health {
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 5px 14px;
+  border-radius: 6px;
+}
+.report-health.health-good { color: #67c23a; background: rgba(103,194,58,0.12); }
+.report-health.health-warn { color: #e6a23c; background: rgba(230,162,60,0.12); }
+.report-health.health-bad  { color: #f56c6c; background: rgba(245,108,108,0.14); }
+.report-expand { padding: 6px 12px; }
+.report-sug { color: #e0a64b; }
+.report-err { color: #ff7b7b; }
+.report-ok  { color: #67c23a; }
+:deep(.row-fail) { --el-table-tr-bg-color: rgba(245,108,108,0.08); }
+:deep(.row-error) { --el-table-tr-bg-color: rgba(144,147,153,0.08); }
+.run-suggestion {
+  display: flex;
+  align-items: center;
+  background: #2b1d0a;
+  color: #e0a64b;
+  font-size: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #3a2a10;
 }
 .run-stdout {
   background: #0d1117;

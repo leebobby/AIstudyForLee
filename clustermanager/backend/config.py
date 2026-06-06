@@ -29,5 +29,8 @@ PXE_DATA_DIR  = os.path.join(BASE_DIR, "pxe_data")
 STATIC_DIR    = os.path.join(BASE_DIR, "static")
 # PXE Host 部署 ISO 存放目录（Windows 管理站本地，通过 HTTP 暴露给 BMC）
 ISO_DIR             = os.environ.get("CLUSTER_MANAGER_ISO_DIR") or os.path.join(BASE_DIR, "iso")
+# 固件仓库目录: 集群节点 firstboot 阶段从此处拉取 NIC/HBA/SSD 固件
+FIRMWARE_DIR        = os.environ.get("CLUSTER_MANAGER_FIRMWARE_DIR") or os.path.join(BASE_DIR, "firmware")
 SCRIPTS_BUNDLE_PATH = os.path.join(BASE_DIR, "scripts_bundle.json")
 os.makedirs(ISO_DIR, exist_ok=True)
+os.makedirs(FIRMWARE_DIR, exist_ok=True)

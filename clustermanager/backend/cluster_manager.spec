@@ -14,7 +14,7 @@
 import os
 from PyInstaller.utils.hooks import collect_all
 
-block_cipher = None
+# 注: PyInstaller 6.x 已移除字节码加密(cipher)特性, 故不再传 cipher 参数。
 
 # pywebview 在 Windows 用 Edge WebView2, 依赖 clr_loader / proxy_tools 等动态库
 # 用 collect_all 收集完整, 避免漏掉 native dll
@@ -105,11 +105,10 @@ a = Analysis(
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,

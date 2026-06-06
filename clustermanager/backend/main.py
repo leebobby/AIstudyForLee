@@ -10,10 +10,10 @@ from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 
-from config import STATIC_DIR, ISO_DIR
+from config import STATIC_DIR, ISO_DIR, FIRMWARE_DIR
 from models.node import init_db, engine
 from models.seed import seed_demo_data
-from api import nodes, pxe, ipmi, network, alerts, diagnose, patrol
+from api import nodes, pxe, ipmi, network, alerts, diagnose, patrol, firmware
 
 
 def _run_migrations():
@@ -21,6 +21,10 @@ def _run_migrations():
     migrations = [
         "ALTER TABLE diag_scripts ADD COLUMN script_tab VARCHAR(20) DEFAULT 'hardware'",
         "ALTER TABLE diag_scripts ADD COLUMN output_mode VARCHAR(20) DEFAULT 'stdout'",
+        # 诊断结果判定规则 + 处置建议
+        "ALTER TABLE diag_scripts ADD COLUMN expect_mode VARCHAR(20) DEFAULT 'exit_code'",
+        "ALTER TABLE diag_scripts ADD COLUMN expect_pattern TEXT DEFAULT ''",
+        "ALTER TABLE diag_scripts ADD COLUMN suggestion TEXT DEFAULT ''",
         # v2: PXE 节点新增字段
         "ALTER TABLE nodes ADD COLUMN rdma_nics VARCHAR(100)",
         "ALTER TABLE nodes ADD COLUMN rdma_ips  VARCHAR(200)",
@@ -37,6 +41,8 @@ def _run_migrations():
         # 防御: 老库可能缺这两列, sync 在 INSERT 时会因为列不存在静默失败
         "ALTER TABLE nodes ADD COLUMN ctrl_status VARCHAR(20) DEFAULT 'offline'",
         "ALTER TABLE nodes ADD COLUMN data_status VARCHAR(20) DEFAULT 'offline'",
+        # 节点固件版本快照(firstboot 阶段刷固件后回报)
+        "ALTER TABLE nodes ADD COLUMN nic_firmware JSON",
     ]
     with engine.connect() as conn:
         for sql in migrations:
@@ -83,6 +89,7 @@ app.include_router(network.router, prefix="/api/network", tags=["网络配置"])
 app.include_router(alerts.router,  prefix="/api/alerts",  tags=["告警管理"])
 app.include_router(diagnose.router,prefix="/api/diagnose",tags=["故障诊断"])
 app.include_router(patrol.router,  prefix="/api/patrol",  tags=["巡检管理"])
+app.include_router(firmware.router,prefix="/api/firmware",tags=["固件仓库"])
 
 
 @app.get("/api/health")
@@ -94,6 +101,11 @@ async def health_check():
 # 必须在 SPA catch-all 之前挂载，否则会被 index.html 兜底拦截
 if os.path.isdir(ISO_DIR):
     app.mount("/iso", StaticFiles(directory=ISO_DIR), name="iso")
+
+# ── 固件仓库（节点 firstboot 阶段拉取 NIC/HBA/SSD 固件）─────────────────────
+# 路径同样需要在 SPA catch-all 之前挂载
+if os.path.isdir(FIRMWARE_DIR):
+    app.mount("/firmware", StaticFiles(directory=FIRMWARE_DIR), name="firmware")
 
 
 # ── 前端静态文件（打包后 static/ 目录存在则启用）────────────────────────────
@@ -119,7 +131,7 @@ if os.path.isdir(STATIC_DIR):
     from fastapi import HTTPException as _HTTPException
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
-        if full_path.startswith(("api/", "iso/")):
+        if full_path.startswith(("api/", "iso/", "firmware/")):
             raise _HTTPException(status_code=404)
         index = os.path.join(STATIC_DIR, "index.html")
         return FileResponse(index)

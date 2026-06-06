@@ -32,21 +32,6 @@
     "dirs": "/data",
     "bmc_ip": "172.16.0.51"
   },
-  "aa:bb:cc:22:00:02": {
-    "hostname_new": "slave-02",
-    "role": "slave",
-    "ctrl_nic": "eno1",
-    "ctrl_ip": "172.16.3.52/24",
-    "ctrl_gw": "172.16.3.1",
-    "rdma_nics": "eno2",
-    "rdma_ips": "100.1.1.52/24",
-    "nfs_mounts": "100.1.1.170:/data/export:/mnt/swath1,100.1.1.171:/data/export:/mnt/swath2,100.1.2.172:/data/export:/mnt/global",
-    "hugepages_1g": "0",
-    "system_disk": "/dev/sda",
-    "data_disks": "",
-    "dirs": "/data",
-    "bmc_ip": "172.16.0.52"
-  },
   "aa:bb:cc:33:00:01": {
     "hostname_new": "subswath-01",
     "role": "subswath",
@@ -64,24 +49,6 @@
     "dirs": "/data/export",
     "extra_pkgs": "nfs-utils mdadm",
     "bmc_ip": "172.16.0.170"
-  },
-  "aa:bb:cc:33:00:02": {
-    "hostname_new": "subswath-02",
-    "role": "subswath",
-    "ctrl_nic": "eno1",
-    "ctrl_ip": "172.16.3.171/24",
-    "ctrl_gw": "172.16.3.1",
-    "rdma_nics": "eno2 eno3",
-    "rdma_ips": "100.1.1.171/24 100.1.2.171/24",
-    "nfs_export_ip": "100.1.1.171",
-    "nfs_exports": "/data/export",
-    "hugepages_1g": "0",
-    "system_disk": "/dev/sda",
-    "data_disks": "/dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1",
-    "data_raid_level": "raid10",
-    "dirs": "/data/export",
-    "extra_pkgs": "nfs-utils mdadm",
-    "bmc_ip": "172.16.0.171"
   },
   "aa:bb:cc:44:00:01": {
     "hostname_new": "gstorage-01",

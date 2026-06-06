@@ -45,6 +45,10 @@ class Node(Base):
     memory_gb = Column(Integer)
     disk_gb = Column(Integer)
 
+    # NIC / HBA / SSD 等设备的固件版本快照,由 firstboot 阶段刷固件后回报
+    # 形如 [{"pci":"0000:01:00.0","name":"ConnectX-5","from":"22.35.4030","to":"22.36.1010","at":"..."}]
+    nic_firmware = Column(JSON)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     last_seen = Column(DateTime)
     last_mgmt_seen = Column(DateTime)
@@ -204,6 +208,18 @@ class DiagScript(Base):
     #              files  = 脚本 stdout 是一行一个的远端绝对路径, 后端 SFTP 全文件下载
     # business/hardware 类型脚本固定 stdout 即可, 不会被读到
     output_mode = Column(String(20), default='stdout')
+
+    # 结果判定规则 (business/hardware 诊断用, 把"跑命令"升级成"判结论"):
+    #   exit_code      : 仅看退出码, 0=正常 否则=异常 (默认, 兼容旧行为)
+    #   fault_if_match : stdout/stderr 命中 expect_pattern(正则) → 异常, 否则正常
+    #                    例: error|fail|panic, 命中即判故障
+    #   pass_if_match  : 命中 expect_pattern → 正常, 否则异常
+    #                    例: 期望出现 'active (running)', 没出现即异常
+    expect_mode = Column(String(20), default='exit_code')
+    expect_pattern = Column(Text, default='')
+    # 判异常时给运维看的处置建议 (一键体检报告里异常项直接展示)
+    suggestion = Column(Text, default='')
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 

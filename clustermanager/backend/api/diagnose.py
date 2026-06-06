@@ -18,9 +18,12 @@ import re
 
 from models.node import Node, Log, FaultPoint, DPDKStats, RDMAStats, DiagScript, get_db, SessionLocal
 from pydantic import BaseModel
-from services.diag_service import run_ssh_command, collect_node_logs, export_files_via_sftp
+from services.diag_service import (
+    run_ssh_command, collect_node_logs, export_files_via_sftp,
+    EXIT_TIMEOUT, EXIT_CANCELLED, EXIT_ERROR,
+)
 from services import cred_service
-from config import SCRIPTS_BUNDLE_PATH
+from config import SCRIPTS_BUNDLE_PATH, BASE_DIR
 
 # 全局执行器: 诊断脚本通常都不算 CPU 密集, 给一个共享池足够
 _SSH_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="ssh-exec")
@@ -55,6 +58,35 @@ def _cancel_run(run_id: str) -> bool:
 
 
 router = APIRouter()
+
+
+def _evaluate_verdict(res: dict, expect_mode: str, expect_pattern: str) -> str:
+    """
+    根据脚本判定规则把一次执行结果归成三态:
+      pass  正常 | fail 异常 | error 执行错误(连接失败/超时/取消, 无法判定健康度)
+
+    expect_mode:
+      exit_code      退出码 0=正常 否则异常 (默认)
+      fault_if_match stdout/stderr 命中 expect_pattern → 异常
+      pass_if_match  命中 expect_pattern → 正常, 否则异常
+    """
+    exit_code = res.get("exit_code", -1)
+    if exit_code in (EXIT_ERROR, EXIT_TIMEOUT, EXIT_CANCELLED):
+        return "error"
+
+    mode = (expect_mode or "exit_code").lower()
+    pattern = (expect_pattern or "").strip()
+    if mode in ("fault_if_match", "pass_if_match") and pattern:
+        haystack = (res.get("stdout") or "") + "\n" + (res.get("stderr") or "")
+        try:
+            matched = re.search(pattern, haystack, re.IGNORECASE | re.MULTILINE) is not None
+        except re.error:
+            matched = pattern.lower() in haystack.lower()   # 正则非法 → 退化为子串匹配
+        if mode == "fault_if_match":
+            return "fail" if matched else "pass"
+        return "pass" if matched else "fail"
+
+    return "pass" if exit_code == 0 else "fail"
 
 
 class FaultPointResponse(BaseModel):
@@ -400,6 +432,9 @@ class DiagScriptCreate(BaseModel):
     timeout: int = 30
     enabled: bool = True
     output_mode: str = 'stdout'           # stdout / files (仅 log_export 用到)
+    expect_mode: str = 'exit_code'        # exit_code / fault_if_match / pass_if_match
+    expect_pattern: Optional[str] = ''    # 判定用的关键字/正则
+    suggestion: Optional[str] = ''        # 判异常时展示的处置建议
 
 
 class DiagScriptResponse(BaseModel):
@@ -413,6 +448,9 @@ class DiagScriptResponse(BaseModel):
     timeout: int
     enabled: bool
     output_mode: Optional[str] = 'stdout'
+    expect_mode: Optional[str] = 'exit_code'
+    expect_pattern: Optional[str] = ''
+    suggestion: Optional[str] = ''
     created_at: datetime
     updated_at: datetime
 
@@ -486,6 +524,9 @@ def _scripts_to_list(scripts) -> list:
             "timeout": s.timeout,
             "enabled": s.enabled,
             "output_mode": getattr(s, "output_mode", "stdout") or "stdout",
+            "expect_mode": getattr(s, "expect_mode", "exit_code") or "exit_code",
+            "expect_pattern": getattr(s, "expect_pattern", "") or "",
+            "suggestion": getattr(s, "suggestion", "") or "",
         }
         for s in scripts
     ]
@@ -570,6 +611,169 @@ def get_bundle_info():
         }
     except Exception as e:
         return {"exists": True, "count": 0, "mtime": None, "error": str(e)}
+
+
+# ─────────────────────────────────────────────
+#  .sh 文件夹包: 每脚本一个 .sh 文件 (带 #@ 元数据头), tab/分类 用两级目录承载
+#  方便用 VSCode / git 在外部管理复杂脚本, 再整目录导回
+# ─────────────────────────────────────────────
+
+KNOWN_TABS = ("business", "hardware", "log_export")
+DEFAULT_SCRIPTS_DIR = os.path.join(BASE_DIR, "diag_scripts")
+_SH_META_RE = re.compile(r"^#@\s*([A-Za-z_]+)\s*:\s?(.*)$")
+
+
+def _resolve_scripts_dir(d: Optional[str]) -> str:
+    return (d or "").strip() or DEFAULT_SCRIPTS_DIR
+
+
+def _script_to_sh(s: dict) -> str:
+    """把一条脚本序列化成自带 #@ 头的 .sh 文本。tab/分类由目录承载, 不写进头。"""
+    def one_line(v):
+        return (v or "").replace("\r", "").replace("\n", " ").strip()
+    head = [
+        f"#@ name: {one_line(s.get('name'))}",
+        f"#@ description: {one_line(s.get('description'))}",
+        f"#@ target_node_type: {s.get('target_node_type') or 'all'}",
+        f"#@ timeout: {s.get('timeout') or 30}",
+        f"#@ enabled: {'true' if s.get('enabled', True) else 'false'}",
+        f"#@ output_mode: {s.get('output_mode') or 'stdout'}",
+        f"#@ expect_mode: {s.get('expect_mode') or 'exit_code'}",
+        f"#@ expect_pattern: {one_line(s.get('expect_pattern'))}",
+        f"#@ suggestion: {one_line(s.get('suggestion'))}",
+        "",
+    ]
+    body = (s.get("script_content") or "").replace("\r\n", "\n")
+    if not body.endswith("\n"):
+        body += "\n"
+    return "\n".join(head) + body
+
+
+def _parse_sh(text: str):
+    """解析 .sh 文本 → (meta dict, body str)。头部连续的 #@ 行为元数据, 其后为正文。"""
+    lines = text.splitlines()
+    meta, i = {}, 0
+    while i < len(lines):
+        m = _SH_META_RE.match(lines[i])
+        if not m:
+            break
+        meta[m.group(1).lower()] = m.group(2).rstrip()
+        i += 1
+    while i < len(lines) and lines[i].strip() == "":   # 跳过头与正文间的空行
+        i += 1
+    return meta, "\n".join(lines[i:])
+
+
+def _sh_to_script(meta: dict, body: str, tab: str, category: str) -> dict:
+    def to_int(v, d):
+        try: return int(str(v).strip())
+        except Exception: return d
+    def to_bool(v, d):
+        if v is None or v == "": return d
+        return str(v).strip().lower() in ("1", "true", "yes", "on", "y")
+    return {
+        "name": meta.get("name") or "",
+        "description": meta.get("description", ""),
+        "script_tab": tab,
+        "category": category,
+        "script_content": body,
+        "target_node_type": meta.get("target_node_type") or "all",
+        "timeout": to_int(meta.get("timeout"), 30),
+        "enabled": to_bool(meta.get("enabled"), True),
+        "output_mode": meta.get("output_mode") or "stdout",
+        "expect_mode": meta.get("expect_mode") or "exit_code",
+        "expect_pattern": meta.get("expect_pattern", ""),
+        "suggestion": meta.get("suggestion", ""),
+    }
+
+
+class ScriptsDirRequest(BaseModel):
+    dir: Optional[str] = ""          # 空 → BASE_DIR/diag_scripts
+    mode: str = "merge"              # 仅导入用: merge=upsert / replace=先清空
+
+
+@router.post("/scripts/export-dir")
+def export_scripts_dir(req: ScriptsDirRequest, db: Session = Depends(get_db)):
+    """把全部脚本写成 {dir}/{tab}/{分类}/{名称}.sh 文件树 (每文件带 #@ 头)。"""
+    root = _resolve_scripts_dir(req.dir)
+    scripts = db.query(DiagScript).order_by(
+        DiagScript.script_tab, DiagScript.category, DiagScript.name
+    ).all()
+    items = _scripts_to_list(scripts)
+    used = set()
+    count = 0
+    for d in items:
+        tab = _safe_filename(d["script_tab"] or "hardware")
+        cat = _safe_filename(d["category"] or "通用诊断")
+        sub = os.path.join(root, tab, cat)
+        os.makedirs(sub, exist_ok=True)
+        base = _safe_filename(d["name"] or "untitled")
+        path = os.path.join(sub, base + ".sh")
+        n = 2
+        while path in used:               # 同目录同名脚本去重
+            path = os.path.join(sub, f"{base}-{n}.sh"); n += 1
+        used.add(path)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(_script_to_sh(d))
+        count += 1
+    return {"ok": True, "dir": root, "count": count}
+
+
+@router.post("/scripts/import-dir")
+def import_scripts_dir(req: ScriptsDirRequest, db: Session = Depends(get_db)):
+    """扫描 {dir} 下所有 .sh, 按 (tab+分类+名称) upsert。tab/分类优先取目录层级。"""
+    root = _resolve_scripts_dir(req.dir)
+    if not os.path.isdir(root):
+        raise HTTPException(status_code=404, detail=f"目录不存在: {root}")
+
+    found = []
+    for dirpath, _dirs, filenames in os.walk(root):
+        for fn in filenames:
+            if not fn.endswith(".sh"):
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, root).replace("\\", "/")
+            parts = rel.split("/")
+            # tab/分类 由目录层级推断: {tab}/{category}/.../file.sh
+            tab = parts[0] if len(parts) >= 2 and parts[0] in KNOWN_TABS else None
+            category = parts[-2] if len(parts) >= 3 else None
+            try:
+                with open(full, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except Exception:
+                continue
+            meta, body = _parse_sh(text)
+            tab = tab or meta.get("tab") or "hardware"
+            category = category or meta.get("category") or "通用诊断"
+            if not meta.get("name"):
+                meta["name"] = os.path.splitext(fn)[0]
+            found.append(_sh_to_script(meta, body, tab, category))
+
+    if not found:
+        raise HTTPException(status_code=400, detail=f"目录下未找到 .sh 脚本: {root}")
+
+    if req.mode == "replace":
+        db.query(DiagScript).delete()
+        db.commit()
+
+    created = updated = 0
+    for item in found:
+        existing = db.query(DiagScript).filter(
+            DiagScript.script_tab == item["script_tab"],
+            DiagScript.category == item["category"],
+            DiagScript.name == item["name"],
+        ).first()
+        if existing:
+            for k, v in item.items():
+                setattr(existing, k, v)
+            existing.updated_at = datetime.utcnow()
+            updated += 1
+        else:
+            db.add(DiagScript(**item))
+            created += 1
+    db.commit()
+    return {"ok": True, "dir": root, "created": created, "updated": updated,
+            "total": created + updated}
 
 
 class ScriptRunRequest(BaseModel):
@@ -666,6 +870,10 @@ async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depend
     script_timeout = script.timeout
     ssh_user = req.ssh_user
     ssh_port = req.ssh_port
+    # 判定规则快照 (会话内只读, 提前取出避免在线程里碰 ORM 对象)
+    expect_mode = script.expect_mode or "exit_code"
+    expect_pattern = script.expect_pattern or ""
+    suggestion = script.suggestion or ""
 
     # 注册运行状态用于「终止」
     run_id = uuid.uuid4().hex[:12]
@@ -699,21 +907,18 @@ async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depend
 
         async def _run_one(node_id: Optional[int], hostname: str, host: Optional[str]):
             if not host:
-                payload = {
-                    "type": "result",
-                    "node_id": node_id, "hostname": hostname, "host": None,
+                res = {
                     "success": False, "stdout": "",
                     "stderr": "节点未配置控制面 IP (ctrl_ip), 无法 SSH",
-                    "exit_code": -1,
+                    "exit_code": EXIT_ERROR,
                 }
+                host = None
             elif _is_cancelled():
                 # 终止时尚未排到的节点直接 short-circuit, 不发起连接
-                payload = {
-                    "type": "result",
-                    "node_id": node_id, "hostname": hostname, "host": host,
+                res = {
                     "success": False, "stdout": "",
                     "stderr": "[已取消, 未执行]",
-                    "exit_code": -3,
+                    "exit_code": EXIT_CANCELLED,
                 }
             else:
                 try:
@@ -725,12 +930,16 @@ async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depend
                         _is_cancelled, _register_client,
                     )
                 except Exception as e:
-                    res = {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1}
-                payload = {
-                    "type": "result",
-                    "node_id": node_id, "hostname": hostname, "host": host,
-                    **res,
-                }
+                    res = {"success": False, "stdout": "", "stderr": str(e), "exit_code": EXIT_ERROR}
+
+            verdict = _evaluate_verdict(res, expect_mode, expect_pattern)
+            payload = {
+                "type": "result",
+                "node_id": node_id, "hostname": hostname, "host": host,
+                "verdict": verdict,
+                "suggestion": suggestion if verdict == "fail" else "",
+                **res,
+            }
             await queue.put(payload)
 
         # 所有节点并发起跑
@@ -738,19 +947,219 @@ async def run_script(script_id: int, req: ScriptRunRequest, db: Session = Depend
             asyncio.create_task(_run_one(nid, hn, host))
 
         # 按完成顺序流式返回
-        success_count = 0
+        pass_count = fail_count = error_count = 0
         try:
             for _ in range(total):
                 item = await queue.get()
-                if item.get("success"):
-                    success_count += 1
+                v = item.get("verdict")
+                if v == "pass":
+                    pass_count += 1
+                elif v == "fail":
+                    fail_count += 1
+                else:
+                    error_count += 1
                 yield _emit(item)
 
             yield _emit({
                 "type": "end",
                 "run_id": run_id,
                 "total": total,
-                "success": success_count,
+                # success 保留为"正常项数", 兼容旧前端
+                "success": pass_count,
+                "passed": pass_count,
+                "failed": fail_count,
+                "errored": error_count,
+                "cancelled": _is_cancelled(),
+            })
+        finally:
+            with _RUNS_LOCK:
+                _ACTIVE_RUNS.pop(run_id, None)
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+# ─────────────────────────────────────────────
+#  一键体检: 一组节点 × 一组脚本 并发执行, 自动判定三态, SSE 汇总
+# ─────────────────────────────────────────────
+
+class BatchRunRequest(BaseModel):
+    node_ids: List[int] = []
+    target_ips: List[str] = []
+    ssh_user: str = "root"
+    ssh_password: str = ""
+    ssh_port: int = 22
+    # 脚本选择: script_ids 显式优先; 否则按 script_tab(+可选 category) 取全部启用脚本
+    script_ids: List[int] = []
+    script_tab: Optional[str] = None       # business / hardware
+    category: Optional[str] = None
+    alert_time: Optional[datetime] = None
+    range_before_min: int = 0
+    range_after_min: int = 0
+
+
+@router.post("/scripts/batch-run")
+async def batch_run(req: BatchRunRequest, db: Session = Depends(get_db)):
+    """
+    一键体检: 把选定的诊断脚本在选定的一组目标上全部跑一遍 (脚本 × 目标 笛卡尔积),
+    每个组合并发执行并自动判定 pass/fail/error, 通过 SSE 流式回报, 供前端汇总成体检报告。
+
+    脚本范围:
+      - 传 script_ids 时按 id 取 (保留前端顺序)
+      - 否则按 script_tab(+category) 取全部 enabled 脚本
+      - 一律排除 log_export (那是日志导出, 不参与健康判定)
+
+    节点类型过滤:
+      - DB 节点会按脚本 target_node_type 过滤 (master 脚本不会跑到 slave 上)
+      - 手动 IP 因为不知道角色, 一律执行
+    """
+    # ── 解析脚本 ──
+    q = db.query(DiagScript).filter(DiagScript.script_tab != "log_export")
+    if req.script_ids:
+        rows = q.filter(DiagScript.id.in_(req.script_ids)).all()
+        by_id = {s.id: s for s in rows}
+        scripts = [by_id[i] for i in req.script_ids if i in by_id]
+    else:
+        if req.script_tab:
+            q = q.filter(DiagScript.script_tab == req.script_tab)
+        if req.category:
+            q = q.filter(DiagScript.category == req.category)
+        scripts = q.filter(DiagScript.enabled == True).order_by(
+            DiagScript.category, DiagScript.name
+        ).all()
+    if not scripts:
+        raise HTTPException(status_code=400, detail="没有可执行的诊断脚本")
+
+    # ── 解析密码 ──
+    password = cred_service.resolve_password(req.ssh_password)
+    if not password:
+        raise HTTPException(status_code=400, detail="未提供密码且无已保存凭据")
+    if req.ssh_password and req.ssh_password != cred_service.PWD_MASK:
+        try:
+            cred_service.save_creds(req.ssh_user, req.ssh_password, req.ssh_port)
+        except Exception:
+            pass
+
+    # ── 解析目标 (node_id, hostname, host, node_type) ──
+    nodes = db.query(Node).filter(Node.id.in_(req.node_ids)).all() if req.node_ids else []
+    targets = [(n.id, n.hostname, _resolve_host(n), n.node_type) for n in nodes]
+    for ip in req.target_ips:
+        ip = ip.strip()
+        if ip:
+            targets.append((None, ip, ip, None))
+    if not targets:
+        raise HTTPException(status_code=400, detail="请选择目标节点或填写目标 IP")
+
+    # ── 脚本快照 + 告警时间窗注入 ──
+    env_prefix = _build_env_prefix(req.alert_time, req.range_before_min, req.range_after_min)
+    script_snap = [{
+        "id": s.id, "name": s.name, "category": s.category,
+        "content": env_prefix + s.script_content,
+        "timeout": s.timeout,
+        "target_node_type": s.target_node_type or "all",
+        "expect_mode": s.expect_mode or "exit_code",
+        "expect_pattern": s.expect_pattern or "",
+        "suggestion": s.suggestion or "",
+    } for s in scripts]
+
+    # ── 组装 (脚本 × 目标) 任务对, 按节点类型过滤 ──
+    pairs = []
+    for t_nid, t_host_name, t_host, t_ntype in targets:
+        for sc in script_snap:
+            want = sc["target_node_type"]
+            if t_ntype is not None and want != "all" and want != t_ntype:
+                continue  # master 脚本不下发到 slave
+            pairs.append((sc, t_nid, t_host_name, t_host, t_ntype))
+    if not pairs:
+        raise HTTPException(status_code=400, detail="选定脚本与目标节点类型不匹配, 无可执行项")
+    total = len(pairs)
+
+    ssh_user = req.ssh_user
+    ssh_port = req.ssh_port
+
+    run_id = uuid.uuid4().hex[:12]
+    state = _make_run_state()
+    with _RUNS_LOCK:
+        _ACTIVE_RUNS[run_id] = state
+
+    def _register_client(c):
+        with state["lock"]:
+            state["clients"].append(c)
+
+    def _is_cancelled() -> bool:
+        return state["cancel"].is_set()
+
+    async def _stream():
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def _emit(item: dict):
+            return f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+        yield _emit({
+            "type": "start",
+            "run_id": run_id,
+            "total": total,
+            "script_count": len(script_snap),
+            "target_count": len(targets),
+            "alert_time": req.alert_time.isoformat() if req.alert_time else None,
+        })
+
+        async def _run_pair(sc, node_id, hostname, host, ntype):
+            if not host:
+                res = {"success": False, "stdout": "",
+                       "stderr": "节点未配置控制面 IP (ctrl_ip), 无法 SSH",
+                       "exit_code": EXIT_ERROR}
+                host = None
+            elif _is_cancelled():
+                res = {"success": False, "stdout": "",
+                       "stderr": "[已取消, 未执行]", "exit_code": EXIT_CANCELLED}
+            else:
+                try:
+                    res = await loop.run_in_executor(
+                        _SSH_EXECUTOR,
+                        run_ssh_command,
+                        host, ssh_port, ssh_user, password,
+                        sc["content"], sc["timeout"],
+                        _is_cancelled, _register_client,
+                    )
+                except Exception as e:
+                    res = {"success": False, "stdout": "", "stderr": str(e),
+                           "exit_code": EXIT_ERROR}
+
+            verdict = _evaluate_verdict(res, sc["expect_mode"], sc["expect_pattern"])
+            await queue.put({
+                "type": "result",
+                "script_id": sc["id"], "script_name": sc["name"], "category": sc["category"],
+                "node_id": node_id, "hostname": hostname, "host": host,
+                "node_type": ntype,
+                "verdict": verdict,
+                "suggestion": sc["suggestion"] if verdict == "fail" else "",
+                **res,
+            })
+
+        for sc, nid, hn, host, ntype in pairs:
+            asyncio.create_task(_run_pair(sc, nid, hn, host, ntype))
+
+        pass_count = fail_count = error_count = 0
+        try:
+            for _ in range(total):
+                item = await queue.get()
+                v = item.get("verdict")
+                if v == "pass":
+                    pass_count += 1
+                elif v == "fail":
+                    fail_count += 1
+                else:
+                    error_count += 1
+                yield _emit(item)
+
+            yield _emit({
+                "type": "end",
+                "run_id": run_id,
+                "total": total,
+                "passed": pass_count,
+                "failed": fail_count,
+                "errored": error_count,
                 "cancelled": _is_cancelled(),
             })
         finally:

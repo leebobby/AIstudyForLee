@@ -909,6 +909,92 @@ def get_pxe_host_status(db: Session = Depends(get_db)):
     }
 
 
+# ── 节点回报端点(firstboot 阶段触发)─────────────────────────────────────────
+
+class NodeReport(BaseModel):
+    """
+    节点 firstboot 阶段向管理面回报事件。
+    典型事件:
+      - stage:        阶段切换(network_ok / firmware_check / pkg_done / online)
+      - fw_flashed:   单张设备固件升级成功
+      - fw_failed:    单张设备固件升级失败
+      - need_cold_reboot: 升级后需冷启动(管理面应发 IPMI power cycle)
+      - finished:     firstboot 全部完成,节点进入 online
+    """
+    hostname: str
+    event: str
+    # 固件相关
+    device: Optional[str] = None        # PCI 地址或网口名
+    nic_name: Optional[str] = None      # ConnectX-5 / hinic 等
+    fw_from: Optional[str] = None
+    fw_to: Optional[str] = None
+    # 通用
+    stage: Optional[str] = None
+    message: Optional[str] = None
+    detail: Optional[Dict[str, Any]] = None
+
+
+@router.post("/report")
+def node_report(req: NodeReport, db: Session = Depends(get_db)):
+    """
+    接收节点 firstboot 上报。除了写日志, 还要:
+      - fw_flashed   → 把固件版本写入 Node.nic_firmware (累积式 list)
+      - finished     → 节点 status = online
+      - need_cold_reboot → 节点 status = need_cold_reboot, 等管理面调度
+    """
+    import logging
+    log = logging.getLogger("pxe.report")
+    log.info(f"[report] {req.hostname} event={req.event} stage={req.stage} msg={req.message}")
+    print(f"[report] {req.hostname} {req.event} stage={req.stage} dev={req.device} {req.fw_from}->{req.fw_to}")
+
+    node = db.query(Node).filter(Node.hostname == req.hostname).first()
+    if not node:
+        # 不知道的主机名也接受,只是不落库;避免节点早期上报因时序问题被拒
+        return {"ok": True, "known": False}
+
+    now_iso = datetime.utcnow().isoformat() + "Z"
+
+    if req.event == "fw_flashed":
+        existing = list(node.nic_firmware or [])
+        existing.append({
+            "pci":      req.device or "",
+            "name":     req.nic_name or "",
+            "from":     req.fw_from or "",
+            "to":       req.fw_to or "",
+            "at":       now_iso,
+            "status":   "ok",
+        })
+        node.nic_firmware = existing
+
+    elif req.event == "fw_failed":
+        existing = list(node.nic_firmware or [])
+        existing.append({
+            "pci":      req.device or "",
+            "name":     req.nic_name or "",
+            "from":     req.fw_from or "",
+            "to":       req.fw_to or "",
+            "at":       now_iso,
+            "status":   "failed",
+            "message":  req.message or "",
+        })
+        node.nic_firmware = existing
+        node.status = "error"
+
+    elif req.event == "need_cold_reboot":
+        node.status = "need_cold_reboot"
+
+    elif req.event == "finished":
+        node.status = "online"
+        node.last_seen = datetime.utcnow()
+
+    elif req.event == "stage":
+        if req.stage in ("installing", "configuring", "deploying"):
+            node.status = req.stage
+
+    db.commit()
+    return {"ok": True, "known": True, "status": node.status}
+
+
 @router.post("/run-script")
 async def run_script(req: ScriptRunRequest):
     """通过 SSH 在指定节点（控制面 IP）上执行 Shell 脚本"""

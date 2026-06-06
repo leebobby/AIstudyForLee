@@ -831,7 +831,180 @@
         </el-card>
       </el-tab-pane>
 
+      <el-tab-pane label="固件仓库" name="firmware">
+        <el-card shadow="never" style="margin-bottom:14px">
+          <template #header>
+            <div class="card-header">
+              <span>固件文件</span>
+              <div>
+                <el-button size="small" @click="loadFirmwareList">
+                  <el-icon><Refresh /></el-icon> 刷新
+                </el-button>
+                <el-button size="small" type="primary" @click="firmwareUploadVisible = true">
+                  <el-icon><Plus /></el-icon> 上传固件
+                </el-button>
+              </div>
+            </div>
+          </template>
+          <el-alert type="info" :closable="false" style="margin-bottom:12px">
+            <template #title>
+              节点 firstboot 阶段从 <code>http://&lt;pxe-host&gt;/firmware/&lt;rel_path&gt;</code> 拉取固件;
+              并通过 <code>POST /api/pxe/report</code> 回报版本变更
+            </template>
+          </el-alert>
+          <div v-if="firmwareDir" class="form-hint" style="margin-bottom:8px">
+            扫描目录: <code>{{ firmwareDir }}</code>
+          </div>
+          <el-table :data="firmwareList" stripe size="small">
+            <el-table-column label="厂商"   prop="vendor"   width="120" />
+            <el-table-column label="型号"   prop="model"    width="180" />
+            <el-table-column label="版本"   prop="version"  width="140" />
+            <el-table-column label="文件名" prop="filename" />
+            <el-table-column label="大小(MB)" prop="size_mb" width="100" />
+            <el-table-column label="SHA256" width="180">
+              <template #default="{ row }">
+                <span style="font-family:monospace;font-size:12px">{{ row.sha256 ? row.sha256.slice(0,16) + '…' : '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="匹配规则" width="100">
+              <template #default="{ row }">
+                <el-tag v-if="row.referenced_by_manifest" type="success" size="small">已引用</el-tag>
+                <el-tag v-else type="info" size="small">未引用</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="140">
+              <template #default="{ row }">
+                <el-button size="small" type="primary" link @click="useFirmwareInRule(row)">作为规则</el-button>
+                <el-button size="small" type="danger"  link @click="deleteFirmware(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <el-card shadow="never">
+          <template #header>
+            <div class="card-header">
+              <span>固件匹配规则 (manifest.json)</span>
+              <div>
+                <el-button size="small" @click="loadFirmwareManifest">
+                  <el-icon><Refresh /></el-icon> 重载
+                </el-button>
+                <el-button size="small" @click="addManifestRule">
+                  <el-icon><Plus /></el-icon> 新增规则
+                </el-button>
+                <el-button size="small" type="primary" @click="saveFirmwareManifest" :loading="savingManifest">保存</el-button>
+              </div>
+            </div>
+          </template>
+          <el-alert type="warning" :closable="false" style="margin-bottom:12px">
+            <template #title>
+              节点 firstboot 用 lspci 拿到的 vendor:device ID 匹配下表, 每张设备只执行 target_fw 不一致时的烧写
+            </template>
+          </el-alert>
+          <el-table :data="manifestRules" stripe size="small" border>
+            <el-table-column label="启用" width="60">
+              <template #default="{ row }">
+                <el-switch v-model="row.enabled" />
+              </template>
+            </el-table-column>
+            <el-table-column label="vendor_id" width="100">
+              <template #default="{ row }">
+                <el-input v-model="row.match_vendor_id" size="small" placeholder="15b3" />
+              </template>
+            </el-table-column>
+            <el-table-column label="device_id" width="100">
+              <template #default="{ row }">
+                <el-input v-model="row.match_device_id" size="small" placeholder="1019" />
+              </template>
+            </el-table-column>
+            <el-table-column label="名称" min-width="140">
+              <template #default="{ row }">
+                <el-input v-model="row.name" size="small" placeholder="Mellanox ConnectX-5" />
+              </template>
+            </el-table-column>
+            <el-table-column label="目标版本" width="120">
+              <template #default="{ row }">
+                <el-input v-model="row.target_fw" size="small" />
+              </template>
+            </el-table-column>
+            <el-table-column label="image (rel_path)" min-width="220">
+              <template #default="{ row }">
+                <el-select v-model="row.image" filterable size="small" placeholder="选择固件文件">
+                  <el-option v-for="f in firmwareList" :key="f.rel_path"
+                    :label="f.rel_path" :value="f.rel_path" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="工具" width="100">
+              <template #default="{ row }">
+                <el-input v-model="row.tool" size="small" placeholder="mstflint" />
+              </template>
+            </el-table-column>
+            <el-table-column label="烧写命令" min-width="260">
+              <template #default="{ row }">
+                <el-input v-model="row.flash_cmd" size="small"
+                  placeholder="mstflint -d {pci} -i {image} -y burn" />
+              </template>
+            </el-table-column>
+            <el-table-column label="查询命令" min-width="260">
+              <template #default="{ row }">
+                <el-input v-model="row.query_cmd" size="small"
+                  placeholder="mstflint -d {pci} q | awk '/FW Version:/{print $3}'" />
+              </template>
+            </el-table-column>
+            <el-table-column label="post_action" width="130">
+              <template #default="{ row }">
+                <el-select v-model="row.post_action" size="small">
+                  <el-option label="冷启动" value="cold_reboot" />
+                  <el-option label="热启动" value="warm_reboot" />
+                  <el-option label="无"     value="none" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="70" fixed="right">
+              <template #default="{ $index }">
+                <el-button size="small" type="danger" link @click="removeManifestRule($index)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div v-if="!manifestRules.length" class="form-hint" style="text-align:center;padding:20px">
+            暂无规则。请先上传固件文件, 再点【新增规则】配置匹配条件。
+          </div>
+          <div class="form-hint" style="margin-top:10px">
+            节点拉取入口: <code>GET /firmware/manifest.json</code>
+          </div>
+        </el-card>
+      </el-tab-pane>
+
     </el-tabs>
+
+    <!-- ── 固件上传对话框 ─────────────────────────────────────────────── -->
+    <el-dialog v-model="firmwareUploadVisible" title="上传固件" width="520px">
+      <el-form :model="firmwareUploadForm" label-width="100px" size="small">
+        <el-form-item label="厂商" required>
+          <el-input v-model="firmwareUploadForm.vendor" placeholder="如 mellanox / huawei / intel" />
+        </el-form-item>
+        <el-form-item label="型号" required>
+          <el-input v-model="firmwareUploadForm.model" placeholder="如 ConnectX-5 / hinic_4x25GE" />
+        </el-form-item>
+        <el-form-item label="版本" required>
+          <el-input v-model="firmwareUploadForm.version" placeholder="如 22.36.1010" />
+        </el-form-item>
+        <el-form-item label="固件文件" required>
+          <input ref="firmwareFileInput" type="file" />
+        </el-form-item>
+        <el-alert type="info" :closable="false">
+          <template #title>
+            保存为 <code>firmware/{vendor}/{model}/{version}/{原文件名}</code>;
+            上传完自动计算 SHA256
+          </template>
+        </el-alert>
+      </el-form>
+      <template #footer>
+        <el-button @click="firmwareUploadVisible = false">取消</el-button>
+        <el-button type="primary" @click="uploadFirmware" :loading="uploadingFirmware">上传</el-button>
+      </template>
+    </el-dialog>
 
     <!-- ── BMC 发现对话框 ─────────────────────────────────────────────── -->
     <el-dialog v-model="discoverDialogVisible" title="BMC 节点发现" width="460px">
@@ -1463,6 +1636,161 @@ async function checkBMCInfo(row) {
     ElMessage.error('获取 BMC 信息失败')
   }
 }
+
+// ── Tab6: 固件仓库 ────────────────────────────────────────────────────────────
+const firmwareList = ref([])
+const firmwareDir  = ref('')
+const manifestRules = ref([])
+const savingManifest = ref(false)
+const firmwareUploadVisible = ref(false)
+const uploadingFirmware = ref(false)
+const firmwareFileInput = ref(null)
+const firmwareUploadForm = ref({ vendor: '', model: '', version: '' })
+
+async function loadFirmwareList() {
+  try {
+    const { data } = await axios.get('/api/firmware/list')
+    firmwareList.value = data.items || []
+    firmwareDir.value  = data.firmware_dir || ''
+  } catch (e) {
+    ElMessage.error('加载固件列表失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
+async function loadFirmwareManifest() {
+  try {
+    const { data } = await axios.get('/api/firmware/manifest')
+    manifestRules.value = (data.rules || []).map(r => ({
+      enabled: r.enabled !== false,
+      match_vendor_id: r.match?.vendor_id || '',
+      match_device_id: r.match?.device_id || '',
+      name: r.name || '',
+      target_fw: r.target_fw || '',
+      image: r.image || '',
+      tool: r.tool || 'mstflint',
+      flash_cmd: r.flash_cmd || '',
+      query_cmd: r.query_cmd || '',
+      post_action: r.post_action || 'cold_reboot',
+    }))
+  } catch (e) {
+    ElMessage.error('加载 manifest 失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
+function addManifestRule() {
+  manifestRules.value.push({
+    enabled: true,
+    match_vendor_id: '',
+    match_device_id: '',
+    name: '',
+    target_fw: '',
+    image: '',
+    tool: 'mstflint',
+    flash_cmd: 'mstflint -d {pci} -i {image} -y burn',
+    query_cmd: "mstflint -d {pci} q | awk '/FW Version:/{print $3}'",
+    post_action: 'cold_reboot',
+  })
+}
+
+function removeManifestRule(idx) {
+  manifestRules.value.splice(idx, 1)
+}
+
+function useFirmwareInRule(row) {
+  // 给一条新规则预填 image + 名称模板, 用户再补 vendor/device id
+  manifestRules.value.push({
+    enabled: true,
+    match_vendor_id: '',
+    match_device_id: '',
+    name: `${row.vendor} ${row.model}`,
+    target_fw: row.version,
+    image: row.rel_path,
+    tool: 'mstflint',
+    flash_cmd: 'mstflint -d {pci} -i {image} -y burn',
+    query_cmd: "mstflint -d {pci} q | awk '/FW Version:/{print $3}'",
+    post_action: 'cold_reboot',
+  })
+  ElMessage.success(`已添加规则草稿, 请补充 vendor_id / device_id`)
+}
+
+async function saveFirmwareManifest() {
+  // 简单校验: vendor_id / device_id 都是 4 位 16 进制
+  for (const r of manifestRules.value) {
+    if (!/^[0-9a-fA-F]{4}$/.test(r.match_vendor_id) || !/^[0-9a-fA-F]{4}$/.test(r.match_device_id)) {
+      ElMessage.error(`规则 "${r.name || '(未命名)'}" 的 vendor_id/device_id 必须是 4 位 16 进制`)
+      return
+    }
+    if (!r.image) {
+      ElMessage.error(`规则 "${r.name || '(未命名)'}" 未选择固件文件`)
+      return
+    }
+  }
+  savingManifest.value = true
+  try {
+    const { data } = await axios.put('/api/firmware/manifest', { rules: manifestRules.value })
+    ElMessage.success(`已保存 ${data.rule_count} 条规则`)
+    await loadFirmwareList()   // 刷新引用标记
+  } catch (e) {
+    ElMessage.error('保存失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    savingManifest.value = false
+  }
+}
+
+async function uploadFirmware() {
+  const f = firmwareFileInput.value?.files?.[0]
+  const { vendor, model, version } = firmwareUploadForm.value
+  if (!vendor || !model || !version) {
+    ElMessage.warning('请填写厂商 / 型号 / 版本')
+    return
+  }
+  if (!f) {
+    ElMessage.warning('请选择固件文件')
+    return
+  }
+  const fd = new FormData()
+  fd.append('vendor', vendor)
+  fd.append('model', model)
+  fd.append('version', version)
+  fd.append('file', f)
+  uploadingFirmware.value = true
+  try {
+    const { data } = await axios.post('/api/firmware/upload', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    ElMessage.success(`上传成功: ${data.rel_path}`)
+    firmwareUploadVisible.value = false
+    firmwareUploadForm.value = { vendor: '', model: '', version: '' }
+    if (firmwareFileInput.value) firmwareFileInput.value.value = ''
+    await loadFirmwareList()
+  } catch (e) {
+    ElMessage.error('上传失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    uploadingFirmware.value = false
+  }
+}
+
+async function deleteFirmware(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除固件文件: ${row.rel_path}?\n如有规则引用此文件, 保存 manifest 时会报错。`,
+      '删除固件', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch { return }
+  try {
+    await axios.delete('/api/firmware/file', { params: { rel_path: row.rel_path } })
+    ElMessage.success('已删除')
+    await loadFirmwareList()
+  } catch (e) {
+    ElMessage.error('删除失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
+watch(activeTab, async (tab) => {
+  if (tab === 'firmware' && !firmwareList.value.length) {
+    await Promise.all([loadFirmwareList(), loadFirmwareManifest()])
+  }
+})
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 function roleTagType(role) {
